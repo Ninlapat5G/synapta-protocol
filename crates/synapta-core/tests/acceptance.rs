@@ -13,7 +13,7 @@ use synapta_core::protocol::message::{Event, Frame, JobState, Request, RequestFr
 use synapta_core::registry::PeerState;
 use synapta_core::routing::{Rejection, RoutingMode};
 use synapta_core::transport::framing::{read_frame, write_frame};
-use synapta_core::ErrorCode;
+use synapta_core::{ErrorCode, NodeId};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -533,11 +533,30 @@ async fn test_10_deterministic_routing() {
     }
     assert!(
         reference.contains("\"selected\":\"node-b\""),
-        "tie between equal nodes breaks on node id"
+        "nothing sent yet: tie between equal nodes breaks on node id"
     );
 
-    // Real invocations under the same (settled) state go to the same node every time.
-    for _ in 0..10 {
+    // Real invocations: the dry run always names the node that then runs the job, idle nodes
+    // take turns, and a fresh cluster replays the exact same sequence.
+    let first = settled_invocations(&cluster, 10).await;
+    let expected: Vec<NodeId> = (0..10)
+        .map(|i| id(if i % 2 == 0 { "node-b" } else { "node-c" }))
+        .collect();
+    assert_eq!(first, expected);
+    cluster.shutdown().await;
+
+    let replay = sandbox().await;
+    assert_eq!(settled_invocations(&replay, 10).await, first);
+    replay.shutdown().await;
+}
+
+/// Runs `n` short `test.execute` calls from node-a, each after the cluster settled, checking
+/// that `explain` predicted the node that ran it. Returns who ran each call.
+async fn settled_invocations(cluster: &Cluster, n: usize) -> Vec<NodeId> {
+    let a = cluster.node("node-a");
+    let mut ran_on = Vec::new();
+    for _ in 0..n {
+        let predicted = a.explain("test.execute", None).selected.unwrap();
         let outcome = a
             .invoke(
                 "test.execute",
@@ -546,10 +565,13 @@ async fn test_10_deterministic_routing() {
             )
             .await
             .unwrap();
-        assert_eq!(outcome.value.executed_by, id("node-b"));
-        assert!(wait_peer_load(a, "node-b", 0).await);
+        assert_eq!(outcome.value.executed_by, predicted);
+        for peer in ["node-b", "node-c"] {
+            assert!(wait_peer_load(a, peer, 0).await);
+        }
+        ran_on.push(outcome.value.executed_by);
     }
-    cluster.shutdown().await;
+    ran_on
 }
 
 /// Restart safety for state exchange: a restarted node's adverts must outrank its old ones even

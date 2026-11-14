@@ -82,6 +82,11 @@ impl Cluster {
     /// Starts nodes in the given order. A seed written as a node id is replaced by that node's
     /// actual address, so it must refer to a node started earlier.
     pub async fn start(specs: Vec<NodeSpec>) -> Cluster {
+        Self::start_with(specs, |_| {}).await
+    }
+
+    /// Like `start`, with a last change to every node's config before it starts.
+    pub async fn start_with(specs: Vec<NodeSpec>, adjust: impl Fn(&mut NodeConfig)) -> Cluster {
         let dir = tempfile::tempdir().unwrap();
         // node-d is a spare identity for fake peers built inside tests.
         let ids = ["node-a", "node-b", "node-c", "node-d"];
@@ -92,7 +97,8 @@ impl Cluster {
             nodes: Vec::new(),
         };
         for spec in specs {
-            let config = cluster.config_for(&spec);
+            let mut config = cluster.config_for(&spec);
+            adjust(&mut config);
             let node = synapta_core::start(config).await.unwrap();
             cluster.nodes.push(node);
         }

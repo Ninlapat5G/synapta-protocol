@@ -18,6 +18,7 @@ use crate::identity::{NodeIdentity, TrustStore};
 use crate::protocol::message::{CapabilityAdvert, NodeAdvert, ResourceState, SignedAdvert};
 use crate::protocol::{NodeId, PROTOCOL_VERSION};
 use crate::registry::Registry;
+use crate::routing::ledger::DispatchLedger;
 use crate::routing::RoutingDecision;
 use crate::transport::{AddressPolicy, Transport};
 
@@ -41,6 +42,7 @@ pub(crate) struct NodeState {
     pub load_changed: Arc<Notify>,
     pub job_events: JobEventLog,
     pub routing_log: Mutex<VecDeque<RoutingDecision>>,
+    pub dispatch_ledger: DispatchLedger,
     /// Addresses with a running dialer task (at most one per address).
     pub dialers: Mutex<HashSet<SocketAddr>>,
     pub shutdown: CancellationToken,
@@ -74,6 +76,7 @@ impl NodeState {
         Self {
             job_events: JobEventLog::new(limits.max_tracked_remote_jobs, limits.max_events_per_job),
             routing_log: Mutex::new(VecDeque::new()),
+            dispatch_ledger: DispatchLedger::default(),
             registry: RwLock::new(Registry::default()),
             registry_version: watch::channel(0).0,
             own_advert: Mutex::new(OwnAdvert { seq: 0, signed: None }),

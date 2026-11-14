@@ -70,7 +70,7 @@ docs/                เอกสาร (ดูด้านล่าง)
 | อาการ | ไฟล์ |
 |---|---|
 | node หากันไม่เจอ / handshake ไม่ผ่าน | `synapta-core/src/discovery/{link,handshake}.rs` |
-| เลือกเครื่องผิด | `synapta-core/src/routing/mod.rs` (policy) · `routing/dispatch.rs` (ส่งงาน) |
+| เลือกเครื่องผิด / งานไม่กระจาย | `synapta-core/src/routing/mod.rs` (policy) · `routing/ledger.rs` (งานที่ส่งแล้วแต่ advert ยังไม่เห็น) · `routing/dispatch.rs` (ส่งงาน) |
 | งานค้าง / ยกเลิกไม่ได้ | `synapta-core/src/execution/jobs.rs` |
 | config ไม่ผ่าน | `synapta-core/src/config.rs` |
 | UTCP client เรียกไม่ได้ | `synapta-gateway/src/utcp.rs` · `routes.rs` |

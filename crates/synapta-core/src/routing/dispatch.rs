@@ -41,9 +41,11 @@ pub struct RouteFailure {
 }
 
 pub(crate) fn current_decision(state: &NodeState, capability: &str, target: Option<&NodeId>) -> RoutingDecision {
+    let peers = state.registry.read().unwrap().snapshots();
     let view = ClusterView {
         local: state.advert_now(0),
-        peers: state.registry.read().unwrap().snapshots(),
+        ledger: state.dispatch_ledger.view(&peers),
+        peers,
     };
     decide(&view, state.node_id(), capability, target)
 }
@@ -54,7 +56,7 @@ pub(crate) async fn invoke(
     input: Value,
     target: Option<&NodeId>,
 ) -> Result<Routed<InvokeResult>, RouteFailure> {
-    dispatch(state, capability, target, |destination| {
+    dispatch(state, capability, target, CallKind::RunsToCompletion, |destination| {
         let input = input.clone();
         async move {
             match destination {
@@ -93,7 +95,7 @@ pub(crate) async fn submit(
     input: Value,
     target: Option<&NodeId>,
 ) -> Result<Routed<JobSubmitted>, RouteFailure> {
-    dispatch(state, capability, target, |destination| {
+    dispatch(state, capability, target, CallKind::StartsJob, |destination| {
         let input = input.clone();
         async move {
             match destination {
@@ -130,10 +132,20 @@ enum Destination {
     Remote(LinkHandle),
 }
 
+/// What a successful answer means for the executing node's load (see `ledger`).
+#[derive(Clone, Copy)]
+enum CallKind {
+    /// `invoke`: the answer arrives after the job ended.
+    RunsToCompletion,
+    /// `job.submit`: the answer only says the job started.
+    StartsJob,
+}
+
 async fn dispatch<T, F, Fut>(
     state: &Arc<NodeState>,
     capability: &str,
     target: Option<&NodeId>,
+    kind: CallKind,
     perform: F,
 ) -> Result<Routed<T>, RouteFailure>
 where
@@ -150,11 +162,12 @@ where
     }
 
     for node in decision.ranked() {
-        let destination = if &node == state.node_id() {
-            Destination::Local
+        let (destination, sent_at) = if &node == state.node_id() {
+            (Destination::Local, None)
         } else {
-            match state.registry.read().unwrap().ready_link(&node) {
-                Some(link) => Destination::Remote(link),
+            let registry = state.registry.read().unwrap();
+            match registry.ready_link(&node) {
+                Some(link) => (Destination::Remote(link), registry.advert_version(&node)),
                 None => {
                     // Became unavailable between deciding and sending: nothing was sent.
                     decision
@@ -168,8 +181,14 @@ where
                 }
             }
         };
+        // Dropped unsettled on any error: a refused or failed call claims no load.
+        let ticket = state.dispatch_ledger.send(&node, sent_at);
         match perform(destination).await {
             Ok(value) => {
+                match kind {
+                    CallKind::RunsToCompletion => ticket.finished(state.registry.read().unwrap().advert_version(&node)),
+                    CallKind::StartsJob => ticket.accepted(),
+                }
                 decision.attempts.push(attempt(&node, "ok"));
                 decision.selected = Some(node);
                 state.record_decision(&decision);

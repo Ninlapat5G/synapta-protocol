@@ -152,6 +152,11 @@ impl Registry {
         (entry.state == PeerState::Ready && !link.is_closed()).then(|| link.clone())
     }
 
+    /// `(incarnation, seq)` of the advert held for `node_id`.
+    pub fn advert_version(&self, node_id: &NodeId) -> Option<(u64, u64)> {
+        self.peers.get(node_id)?.advert.as_ref().map(NodeAdvert::version)
+    }
+
     pub fn ready_links(&self) -> Vec<LinkHandle> {
         self.peers.keys().filter_map(|id| self.ready_link(id)).collect()
     }

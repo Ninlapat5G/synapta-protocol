@@ -470,19 +470,51 @@ impl Sandbox {
 
     async fn determinism(&mut self) -> StepResult {
         println!("\n==== TEST-10 deterministic routing ====");
+        let api = self.apis["node-a"].clone();
+        // "Same state" needs adverts to have caught up with node-a's own recent calls (a job
+        // cancelled in TEST-08 may not be advertised yet); until then the state is still moving.
+        let settled = poll_until(CONVERGE_TIMEOUT, || {
+            let api = api.clone();
+            async move {
+                matches!(api.get("/routing/explain?capability=test.execute").await,
+                    Ok((200, d)) if d["candidates"].as_array().is_some_and(|c| c.iter().all(|c| c.get("unseen_jobs").is_none())))
+            }
+        })
+        .await;
+        check(settled, "adverts caught up with node-a's own calls")?;
         let (_, first) = self
             .call("node-a", "GET", "/routing/explain?capability=test.execute", None)
             .await?;
-        let api = self.apis["node-a"].clone();
         for _ in 0..20 {
             let (_, again) = api.get("/routing/explain?capability=test.execute").await?;
+            if again != first {
+                println!("first: {first}\nagain: {again}");
+            }
             check(again == first, "same state produced a different decision")?;
         }
         println!("20 repeated decisions identical; selected {}", first["selected"]);
-        check(
-            first["selected"] == "node-b",
-            "equal load ties break on node id (node-b)",
-        )
+
+        // The dry run names the node that then runs the job, and idle nodes take turns.
+        let mut ran_on = Vec::new();
+        for _ in 0..2 {
+            let (_, predicted) = api.get("/routing/explain?capability=test.execute").await?;
+            let short = json!({"suite": "smoke", "steps": 1, "step_ms": 0});
+            let (status, reply) = self.call("node-a", "POST", "/tools/test.execute", Some(short)).await?;
+            check(
+                status == 200 && reply["executed_by"] == predicted["selected"],
+                "explain predicted the executing node",
+            )?;
+            check(
+                self.wait_status("node-a", CONVERGE_TIMEOUT, |s| {
+                    advert_active_jobs(s, "node-b") == Some(0) && advert_active_jobs(s, "node-c") == Some(0)
+                })
+                .await,
+                "load settled",
+            )?;
+            ran_on.push(reply["executed_by"].clone());
+        }
+        println!("two settled calls ran on {} then {}", ran_on[0], ran_on[1]);
+        check(ran_on[0] != ran_on[1], "idle nodes take turns")
     }
 
     async fn peer_failure(&mut self) -> StepResult {

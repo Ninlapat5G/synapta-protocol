@@ -2,9 +2,13 @@
 //! cluster view always yields the same decision, independent of the order peers answered in.
 //! `docs/routing.md` documents this file; change both together.
 //!
-//! Executing the decision (local call, remote call, safe fallback) lives in `dispatch`.
+//! Executing the decision (local call, remote call, safe fallback) lives in `dispatch`; the
+//! caller's record of its own not-yet-advertised calls lives in `ledger`.
 
 pub mod dispatch;
+pub mod ledger;
+
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
@@ -12,8 +16,9 @@ use crate::error::{ErrorBody, ErrorCode};
 use crate::protocol::message::{Availability, NodeAdvert};
 use crate::protocol::NodeId;
 use crate::registry::{PeerSnapshot, PeerState};
+pub use ledger::LedgerEntry;
 
-pub const POLICY: &str = "least-loaded-v1";
+pub const POLICY: &str = "least-loaded-v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +33,8 @@ pub struct ClusterView {
     /// This node's own advert with its current load.
     pub local: NodeAdvert,
     pub peers: Vec<PeerSnapshot>,
+    /// This node's own calls that adverts do not show yet, and when it last sent to each node.
+    pub ledger: BTreeMap<NodeId, LedgerEntry>,
 }
 
 /// Why a node cannot take the request.
@@ -85,12 +92,24 @@ pub struct CandidateReport {
     pub eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejection: Option<Rejection>,
-    /// active_jobs * 1000 / max_concurrent_jobs. Integer so ordering is exact.
+    /// (advertised active_jobs + unseen_jobs) * 1000 / max_concurrent_jobs. Integer so
+    /// ordering is exact.
     pub load_permille: u32,
+    /// Correction from this node's own calls (see `ledger`): +1 sent but not advertised yet,
+    /// -1 finished but still advertised.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unseen_jobs: i32,
     pub cpu_percent: u8,
+    /// Ordinal of this node's latest dispatch there. Breaks load ties: least recent goes first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_dispatch: Option<u64>,
     /// 1 = preferred. Only for eligible candidates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rank: Option<usize>,
+}
+
+fn is_zero(n: &i32) -> bool {
+    *n == 0
 }
 
 /// One dispatch attempt, appended by `dispatch` after the policy decided.
@@ -159,14 +178,14 @@ fn decide_explicit(
     decision: &mut RoutingDecision,
 ) {
     let report = if &view.local.node_id == target {
-        evaluate(&view.local, None, caller, capability)
+        evaluate(view, &view.local, None, caller, capability)
     } else {
         match view.peers.iter().find(|p| &p.node_id == target) {
             Some(PeerSnapshot {
                 advert: Some(advert),
                 state,
                 ..
-            }) => evaluate(advert, Some(*state), caller, capability),
+            }) => evaluate(view, advert, Some(*state), caller, capability),
             _ => {
                 decision.error = Some(ErrorBody::new(
                     ErrorCode::TargetNotFound,
@@ -199,16 +218,23 @@ fn decide_automatic(view: &ClusterView, caller: &NodeId, capability: &str, decis
         }
         decision
             .candidates
-            .push(evaluate(advert, link_state, caller, capability));
+            .push(evaluate(view, advert, link_state, caller, capability));
     }
 
-    // The whole policy is this sort key. Ties end at node id, which is unique, so the order is total.
+    // The whole policy is this sort key. Equal load goes to the node this caller sent to least
+    // recently (never-sent first), so idle nodes take turns. Node id is unique, so the order is
+    // total.
     let mut eligible: Vec<usize> = (0..decision.candidates.len())
         .filter(|&i| decision.candidates[i].eligible)
         .collect();
     eligible.sort_by(|&a, &b| {
         let (a, b) = (&decision.candidates[a], &decision.candidates[b]);
-        (a.load_permille, a.cpu_percent, &a.node_id).cmp(&(b.load_permille, b.cpu_percent, &b.node_id))
+        (a.load_permille, a.cpu_percent, a.last_dispatch, &a.node_id).cmp(&(
+            b.load_permille,
+            b.cpu_percent,
+            b.last_dispatch,
+            &b.node_id,
+        ))
     });
     for (rank, &index) in eligible.iter().enumerate() {
         decision.candidates[index].rank = Some(rank + 1);
@@ -237,9 +263,17 @@ fn decide_automatic(view: &ClusterView, caller: &NodeId, capability: &str, decis
 }
 
 /// `link_state` is `None` for the local node (always reachable).
-fn evaluate(advert: &NodeAdvert, link_state: Option<PeerState>, caller: &NodeId, capability: &str) -> CandidateReport {
+fn evaluate(
+    view: &ClusterView,
+    advert: &NodeAdvert,
+    link_state: Option<PeerState>,
+    caller: &NodeId,
+    capability: &str,
+) -> CandidateReport {
     let r = &advert.resources;
-    let load_permille = (u64::from(r.active_jobs) * 1000 / u64::from(r.max_concurrent_jobs.max(1))) as u32;
+    let ledger = view.ledger.get(&advert.node_id).copied().unwrap_or_default();
+    let active_jobs = r.active_jobs.saturating_add_signed(ledger.unseen_jobs);
+    let load_permille = (u64::from(active_jobs) * 1000 / u64::from(r.max_concurrent_jobs.max(1))) as u32;
     let rejection = match advert.capability(capability) {
         None => Some(Rejection::CapabilityNotAdvertised),
         // A node may always call its own capabilities.
@@ -249,8 +283,8 @@ fn evaluate(advert: &NodeAdvert, link_state: Option<PeerState>, caller: &NodeId,
             _ if r.availability != Availability::Available => Some(Rejection::NotAvailable {
                 availability: r.availability,
             }),
-            _ if r.active_jobs >= r.max_concurrent_jobs => Some(Rejection::AtCapacity {
-                active_jobs: r.active_jobs,
+            _ if active_jobs >= r.max_concurrent_jobs => Some(Rejection::AtCapacity {
+                active_jobs,
                 max_concurrent_jobs: r.max_concurrent_jobs,
             }),
             _ => None,
@@ -262,7 +296,11 @@ fn evaluate(advert: &NodeAdvert, link_state: Option<PeerState>, caller: &NodeId,
         eligible: rejection.is_none(),
         rejection,
         load_permille,
+        // The correction actually applied (after clamping at 0), so a -1 that changed nothing
+        // doesn't show up in the report.
+        unseen_jobs: (i64::from(active_jobs) - i64::from(r.active_jobs)) as i32,
         cpu_percent: r.cpu_percent,
+        last_dispatch: ledger.last_dispatch,
         rank: None,
     }
 }
@@ -329,7 +367,16 @@ mod tests {
                     PeerState::Ready,
                 ),
             ],
+            ledger: BTreeMap::new(),
         }
+    }
+
+    fn sent(view: &mut ClusterView, node: &str, unseen_jobs: i32, last_dispatch: u64) {
+        let entry = LedgerEntry {
+            unseen_jobs,
+            last_dispatch: Some(last_dispatch),
+        };
+        view.ledger.insert(id(node), entry);
     }
 
     #[test]
@@ -344,6 +391,47 @@ mod tests {
         let d = decide(&sandbox(0), &id("node-a"), "test.execute", None);
         assert_eq!(d.selected, Some(id("node-b")));
         assert_eq!(d.ranked(), vec![id("node-b"), id("node-c")]);
+    }
+
+    #[test]
+    fn equal_load_goes_to_the_node_sent_to_least_recently() {
+        let mut view = sandbox(0);
+        sent(&mut view, "node-b", 0, 1);
+        let d = decide(&view, &id("node-a"), "test.execute", None);
+        assert_eq!(d.selected, Some(id("node-c")), "node-c never sent to");
+        sent(&mut view, "node-c", 0, 2);
+        let d = decide(&view, &id("node-a"), "test.execute", None);
+        assert_eq!(d.selected, Some(id("node-b")), "node-b sent to longer ago");
+    }
+
+    #[test]
+    fn unseen_calls_count_as_load() {
+        // The advert says node-b is idle, but this node just sent it a call the advert can't show.
+        let mut view = sandbox(0);
+        sent(&mut view, "node-b", 1, 1);
+        let d = decide(&view, &id("node-a"), "test.execute", None);
+        assert_eq!(d.selected, Some(id("node-c")));
+        let b = d.candidates.iter().find(|c| c.node_id == id("node-b")).unwrap();
+        assert_eq!((b.load_permille, b.unseen_jobs), (500, 1));
+
+        sent(&mut view, "node-b", 2, 1);
+        let d = decide(&view, &id("node-a"), "test.execute", None);
+        let b = d.candidates.iter().find(|c| c.node_id == id("node-b")).unwrap();
+        assert!(matches!(
+            b.rejection,
+            Some(Rejection::AtCapacity { active_jobs: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn finished_call_frees_a_node_its_advert_still_shows_full() {
+        let mut view = sandbox(2);
+        sent(&mut view, "node-b", -1, 1);
+        sent(&mut view, "node-c", 0, 2);
+        // node-c is full for real; node-b's advert says 2/2 but one of those was ours and ended.
+        view.peers[1].advert.as_mut().unwrap().resources.active_jobs = 2;
+        let d = decide(&view, &id("node-a"), "test.execute", None);
+        assert_eq!(d.selected, Some(id("node-b")), "node-b really has a free slot");
     }
 
     #[test]

@@ -173,8 +173,9 @@ async fn job_endpoints_cover_the_async_lifecycle() {
     assert_eq!((status, info["state"].as_str()), (200, Some("succeeded")));
     let (_, events) = api.get(&format!("/jobs/node-b/{job}/events")).await.unwrap();
     assert!(!events["events"].as_array().unwrap().is_empty());
+    // Equal load now; node-a last sent to node-b, so node-c is next in turn.
     let (status, explain) = api.get("/routing/explain?capability=test.execute").await.unwrap();
-    assert_eq!((status, explain["selected"].as_str()), (200, Some("node-b")));
+    assert_eq!((status, explain["selected"].as_str()), (200, Some("node-c")));
     assert_eq!(
         s.cluster.node("node-b").status().executions.get("test.execute"),
         Some(&1)

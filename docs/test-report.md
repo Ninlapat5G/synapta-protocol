@@ -1,6 +1,6 @@
 # Test Report — Synapta Protocol v0.0.1
 
-วันที่รัน: 2026-11-14 · Windows 11 · rustc/cargo 1.99.1 · ทุกการทดสอบอยู่บน 127.0.0.1 และโฟลเดอร์ชั่วคราวเท่านั้น
+วันที่รัน: 2026-11-14 (ปรับ routing + เทสต์โหลด 2026-11-15) · Windows 11 · rustc/cargo 1.99.1 · ทุกการทดสอบอยู่บน 127.0.0.1 และโฟลเดอร์ชั่วคราวเท่านั้น
 
 ## คำสั่ง
 
@@ -15,15 +15,17 @@ cargo clippy --workspace --all-targets -- -D warnings ; cargo fmt --all --check
 
 | ชุด | จำนวน | ผล |
 |---|---|---|
-| unit (`synapta-core`) | 50 | ผ่านทั้งหมด |
+| unit (`synapta-core`) | 59 | ผ่านทั้งหมด |
 | acceptance in-process (`synapta-core/tests/acceptance.rs`) | 12 | ผ่านทั้งหมด |
+| การกระจายงานภายใต้โหลด (`synapta-core/tests/load_balancing.rs`) | 4 | ผ่านทั้งหมด |
 | unit (`synapta-gateway`) | 3 | ผ่านทั้งหมด |
 | UTCP + local API (`synapta-gateway/tests/utcp.rs`) | 3 + 1 | 3 ผ่าน · SDK ทางการ: `ignored` ใน `--workspace`, **ผ่าน** เมื่อรันด้วย `SYNAPTA_UTCP_PYTHON` |
 | E2E 3 process (`synapta-node/tests/e2e.rs`) | 1 | ผ่าน |
-| **รวม `cargo test --workspace`** | **69 ผ่าน, 0 ตก, 1 ignored** | |
-| รวมเมื่อเปิด SDK ทางการ | 70 ผ่าน, 0 ตก | |
+| **รวม `cargo test --workspace`** | **82 ผ่าน, 0 ตก, 1 ignored** | |
+| รวมเมื่อเปิด SDK ทางการ | 83 ผ่าน, 0 ตก | |
 
 ความเสถียร: `acceptance` รันติดกัน 15 รอบ และทั้ง workspace (รวม E2E) 5 รอบ — ผ่านทุกรอบ ไม่มี flaky
+หลังปรับ routing (v2): ทั้ง workspace 4 รอบติด · E2E 8 รอบติด · `load_balancing` 12 รอบติด — ผ่านทุกรอบ
 lint: `clippy -D warnings` สะอาด · `cargo fmt --check` สะอาด
 
 ## ผล TEST-01 … TEST-10
@@ -41,7 +43,7 @@ lint: `clippy -D warnings` สะอาด · `cargo fmt --check` สะอา�
 | TEST-07 Peer Failure | ✅ `test_07_peer_failure` · ✅ `test_07b_silent_peer_detected_by_heartbeat_timeout` | ✅ (kill process จริง) | node-b → `UNAVAILABLE` · auto `test.execute` → node-c · explicit node-b → `target_unavailable` · `math.add` → `no_eligible_node` · node-a ยังทำงาน · peer ที่ handshake แล้วเงียบ ถูกจับได้ด้วย heartbeat timeout (`last_error` มี "heartbeat") |
 | TEST-08 Async Job | ✅ `test_08_async_job_lifecycle` | ✅ | ได้ job id · status `running` · progress event 4/4 (3 process: 5/5) + `job_finished` · ผล `succeeded` · cancel → `cancelled` และ active_jobs กลับเป็น 0 · หลัง retention status = `job_not_found`, `retained_jobs: 0` |
 | TEST-09 Isolation & Security | ✅ `test_09_isolation_and_security` · ✅ `test_09_no_host_command_execution_in_core` · ✅ `local_api_rejects_…` | — | listener ทุกตัว loopback · `0.0.0.0` ถูกปฏิเสธตอน start · node นอก trust list handshake ไม่ผ่าน (`untrusted_peer`) · capability ที่ไม่อนุญาต: router ข้าม + ปลายทางปฏิเสธแม้ส่งตรงข้าม router · malformed JSON / length 4 GB / ขยะ HTTP → error + ปิด connection, node ยังตอบ · สแกน source core ไม่มี `std::process`/`tokio::process`/`Command::new` · local API: token ผิด 401, Host ปลอม 403, body ใหญ่ 413, JSON เสีย 400 |
-| TEST-10 Deterministic | ✅ `test_10_deterministic_routing` + unit `decision_does_not_depend_on_peer_order` | ✅ | explain 50 ครั้ง ได้ JSON ตรงกันทุกไบต์ · invoke จริง 10 ครั้งไป node-b ทุกครั้ง · tie-break ด้วย node id · สลับลำดับ peer แล้วผลเหมือนเดิม |
+| TEST-10 Deterministic | ✅ `test_10_deterministic_routing` + unit `decision_does_not_depend_on_peer_order` | ✅ | explain 50 ครั้ง ได้ JSON ตรงกันทุกไบต์ · invoke จริง 10 ครั้ง: explain ทายเครื่องที่รันถูกทุกครั้ง, สลับ B/C ตามลำดับ · เปิด cluster ใหม่แล้วได้ลำดับเดิมทุกตัว · สลับลำดับ peer แล้วผลเหมือนเดิม |
 
 เพิ่มเติม: `restart_after_clock_regression_still_outranks_old_adverts` (incarnation เพิ่มเสมอหลัง restart แม้นาฬิกาถอยหลัง)
 และ E2E ตรวจว่าแต่ละ node เขียน log แยกไฟล์เป็น JSON lines และไม่มีคำเตือน trust ปลอม
@@ -74,7 +76,7 @@ node-b ถูก kill แบบ hard kill — node-a เห็น `UNAVAILABLE` 
 ```
 node-a POST /tools/math.add {"a":2,"b":3}
 -> 200 {"executed_by":"node-b","job_id":"91e7d5eefbd73da2","result":{"sum":5},
-        "routing":{"mode":"automatic","selected":"node-b","policy":"least-loaded-v1",
+        "routing":{"mode":"automatic","selected":"node-b","policy":"least-loaded-v2",
                    "candidates":[{"node_id":"node-b","eligible":true,"load_permille":0,"cpu_percent":20,"rank":1}],
                    "nodes_without_capability":2,"attempts":[{"node_id":"node-b","outcome":"ok"}]}}
 
@@ -86,6 +88,29 @@ node-a POST /tools/test.execute?target=node-b   (หลัง kill node-b)
 
 routing decision ของ TEST-04 อยู่ใน [`routing.md`](routing.md)
 
+## การกระจายงานภายใต้โหลด (`load_balancing.rs`)
+
+node-a เป็นผู้เรียก · node-b และ node-c รับ `test.execute` ได้ทั้งคู่ · วัด "ใครรันกี่งาน" จากคำตอบ
+และวัดจำนวนงานที่ **กำลังรันจริง** จากตัว node เองทุก 2 ms (ไม่ใช่จาก advert) เพื่อดูเพดานและอัตราการใช้งาน
+รันเทสต์เดียวกันกับโค้ดก่อนแก้ (v1) และหลังแก้ (v2) บนเครื่องเดียวกัน
+
+| สถานการณ์ | v1 (ก่อน) | v2 (หลัง) |
+|---|---|---|
+| งานสั้น 100 งาน ส่งทีละงาน (B, C ว่างทุกครั้ง) | B 100 · C 0 | **B 50 · C 50** |
+| ยิงพร้อมกันทีละ 4 งาน × 10 รอบ (ช่องว่างพอดี 4) | แบ่ง 2+2 ได้ แต่ `busy` เด้ง 20 ครั้ง | **2+2 ทุกรอบ, `busy` 0** |
+| โหลดเกินต่อเนื่อง 4 วินาที: 6 ผู้เรียก, B=2 C=2, งาน 20–100 ms | ใช้งาน 70% / 70% · `busy` 465 | **ใช้งาน 82–91%** · `busy` 235–268 |
+| เหมือนข้างบน แต่ B=4 C=2, 8 ผู้เรียก | ใช้งาน 75% / 74% · `busy` 584 | **ใช้งาน 82–89%** · `busy` 248–308 · B ได้ ~67% ตามสัดส่วน capacity |
+
+ทุกสถานการณ์ทั้ง v1 และ v2: **ไม่มีเครื่องไหนรันเกิน `max_concurrent_jobs` แม้แต่ครั้งเดียว** (เพดานคุมโดยเครื่องปลายทาง)
+และไม่มี error อื่นนอกจาก "คลัสเตอร์เต็ม" (`no_eligible_node` เมื่อทุกช่องมีงานจริง ผู้เรียกรอ 5 ms แล้วลองใหม่)
+
+ตัวเลขโหลดต่อเนื่องเป็นค่าจาก 6 รอบ ช่วงที่แสดงคือต่ำสุด–สูงสุด · `busy` ที่ยังเหลือใน v2 มาจากงานของผู้เรียกที่จบแล้ว
+และ advert ที่ออกก่อนงานถัดไปเริ่มแต่มาถึงทีหลัง (ledger ประมาณต่ำได้ทางเดียว — ดู `routing.md`)
+แต่ละครั้งเสียแค่ไป-กลับหนึ่งรอบบน loopback และงานไม่ถูกรันซ้ำ
+
+**ทดสอบเครื่องแน่น** (รัน 3 ชุดพร้อมกัน): การแบ่งงานยังถูก ไม่มีเครื่องเกินเพดาน อัตราใช้งานลดเหลือ 71–84% เพราะ CPU เครื่องเต็มเอง
+ชุดเทสต์โหลดจึงตั้งเกณฑ์ไว้ที่ ≥ 75% (v1 ได้ 70–75% บนเครื่องว่าง)
+
 ## สิ่งที่พบและแก้ระหว่างทดสอบ
 
 1. **คำเตือน trust ปลอม** — node ได้ advert ของตัวเองวนกลับมาแล้วตรวจลายเซ็นก่อนเช็กว่าเป็นของตัวเอง
@@ -94,6 +119,10 @@ routing decision ของ TEST-04 อยู่ใน [`routing.md`](routing.md)
 2. **log ระดับผิด** — peer ถูก kill แล้วขึ้น "bad frame" (WARN) ทั้งที่เป็น connection reset → แยกเป็น "connection lost" (INFO)
 3. **incarnation จากนาฬิกา** (พบตอน review) — นาฬิกาถอยหลังระหว่าง restart ทำให้ advert ใหม่แพ้ของเก่า → เก็บค่าใน `data_dir`
 4. **สิทธิ์ไฟล์** (พบตอน review) — private key / API token บน Unix เขียนแบบใครก็อ่านได้ → 0600
+5. **เครื่องว่างเท่ากัน B ได้ทุกงาน / ยิงพร้อมกันกองที่ B** (v1) → policy v2: ledger + สลับเครื่องเมื่อโหลดเท่ากัน (ตัวเลขด้านบน)
+6. **heartbeat 600 ms ทำ link หลุดตอนเครื่องแน่น** — ค่า 600 ms เป็นค่าของเทสต์ (จับ peer ตายให้เร็ว) พอรันโหลดหนัก 3 ชุดพร้อมกัน
+   node ตอบ ping ไม่ทัน link ถูกปิด งานที่ค้างบน link นั้นได้ `ConnectionLost` (ถูกต้องตาม at-most-once ไม่ได้รันซ้ำ)
+   เทสต์โหลดเปลี่ยนไปใช้ค่าเดียวกับ production (3 s) แล้วไม่หลุดอีก · **ข้อควรรู้:** เครื่องที่ CPU แน่นมากควรตั้ง `heartbeat_timeout_ms` เผื่อไว้
 
 ## สิ่งที่ยังไม่ได้ทดสอบ
 
