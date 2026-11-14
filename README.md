@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/synapta-logo.png" alt="Synapta Protocol" width="320"></p>
+
 # Synapta Protocol
 
 Protocol ให้ node หลายเครื่องค้นพบกัน ประกาศความสามารถ เลือกเครื่องที่จะทำงาน และส่งงาน / เรียก tool ข้ามเครื่องได้โดยตรง
