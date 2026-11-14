@@ -1,0 +1,21 @@
+[package]
+name = "synapta-core"
+description = "Synapta Protocol core: transport, handshake, discovery, registry, routing, execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,37 @@
+# Node B — server. Seeded with node-c.
+
+[node]
+id = "node-b"
+name = "Node B (server)"
+type = "server"
+listen = "127.0.0.1:47322"
+data_dir = "data/node-b"
+
+[identity]
+private_key_file = "keys/node-b.key"
+
+[api]
+listen = "127.0.0.1:48322"
+
+[discovery]
+seeds = ["127.0.0.1:47323"]
+
+[resources]                # MOCK values; small capacity so resource-aware routing is easy to show
+cpu_percent = 20
+memory_available_mb = 16384
+max_concurrent_jobs = 2
+
+[[capabilities]]
+name = "math.add"
+
+[[capabilities]]
+name = "test.execute"
+allow = ["node-a", "node-c"]
+
+[[trust]]
+node_id = "node-a"
+public_key_file = "keys/node-a.pub"
+
+[[trust]]
+node_id = "node-c"
+public_key_file = "keys/node-c.pub"

@@ -1,0 +1,21 @@
+[package]
+name = "synapta-gateway"
+description = "Local HTTP API of a Synapta node: UTCP manual + tool endpoint, control endpoints, and a minimal client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+synapta-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+httparse.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# process: the official-UTCP-SDK test runs a Python script.
+tokio = { workspace = true, features = ["process"] }

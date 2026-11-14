@@ -1,0 +1,33 @@
+# Node C — edge simulator. No seeds: it learns the others when they connect.
+
+[node]
+id = "node-c"
+name = "Node C (edge simulator)"
+type = "edge"
+listen = "127.0.0.1:47323"
+data_dir = "data/node-c"
+
+[identity]
+private_key_file = "keys/node-c.key"
+
+[api]
+listen = "127.0.0.1:48323"
+
+[resources]                # MOCK values
+cpu_percent = 20
+memory_available_mb = 2048
+max_concurrent_jobs = 2
+
+[[capabilities]]
+name = "system.info"
+
+[[capabilities]]
+name = "test.execute"
+
+[[trust]]
+node_id = "node-a"
+public_key_file = "keys/node-a.pub"
+
+[[trust]]
+node_id = "node-b"
+public_key_file = "keys/node-b.pub"

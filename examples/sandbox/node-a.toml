@@ -1,0 +1,35 @@
+# Node A — client. Seeded with node-b only: it discovers node-c from node-b's adverts.
+# Generate keys first:  synapta-node keygen --out keys/node-a.key   (same for b and c)
+# Run:                  synapta-node run --config examples/sandbox/node-a.toml
+
+[node]
+id = "node-a"
+name = "Node A (client)"
+type = "client"
+listen = "127.0.0.1:47321"
+data_dir = "data/node-a"
+
+[identity]
+private_key_file = "keys/node-a.key"
+
+[api]                      # local HTTP API: UTCP manual + tool endpoint, CLI control
+listen = "127.0.0.1:48321"
+
+[discovery]
+seeds = ["127.0.0.1:47322"]
+
+[resources]                # MOCK values (v0.0.1 does not read the host); active_jobs is real
+cpu_percent = 10
+memory_available_mb = 8192
+max_concurrent_jobs = 4
+
+[[capabilities]]
+name = "system.echo"
+
+[[trust]]
+node_id = "node-b"
+public_key_file = "keys/node-b.pub"
+
+[[trust]]
+node_id = "node-c"
+public_key_file = "keys/node-c.pub"
