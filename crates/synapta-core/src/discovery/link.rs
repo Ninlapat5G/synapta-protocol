@@ -316,6 +316,8 @@ async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, session: Sessio
     state.registry_changed();
     tracing::info!(peer = %peer, "peer READY");
     state.tracer.link_up(&peer);
+    // The advert lists this node's links: tell the network (coalesced with load changes).
+    state.load_changed.notify_one();
 
     state
         .tasks
@@ -355,6 +357,7 @@ async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, session: Sessio
         .unwrap()
         .detach_link(&peer, link.id(), reason, Instant::now());
     state.registry_changed();
+    state.load_changed.notify_one();
     end
 }
 

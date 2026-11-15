@@ -22,7 +22,7 @@ pub struct WireRange {
 
 impl WireRange {
     /// What this build speaks.
-    pub const SUPPORTED: WireRange = WireRange { min: 3, max: 3 };
+    pub const SUPPORTED: WireRange = WireRange { min: 4, max: 4 };
 
     /// The version two nodes use: the highest one both speak.
     pub fn highest_common(self, other: WireRange) -> Option<u32> {

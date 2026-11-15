@@ -1,7 +1,8 @@
 //! Handles requests arriving from an authenticated peer. `caller` is the id proven in the
 //! handshake — never a value taken from the request body.
 //!
-//! The receiving node never forwards work to a third node: it executes locally or refuses.
+//! Work is executed here or refused; it goes on to a third node only inside a `relay`
+//! request, which names its final target (`routing::relay`).
 
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use crate::execution::EventSink;
 use crate::node::state::NodeState;
 use crate::protocol::message::{InvokeResult, JobSubmitted, Request};
 use crate::protocol::NodeId;
+use crate::routing::relay;
 
 pub(crate) async fn handle_request(
     state: &Arc<NodeState>,
@@ -59,6 +61,7 @@ pub(crate) async fn handle_request(
             to_value(state.jobs.wait(caller, &job_id, wait).await?)
         }
         Request::JobCancel { job_id } => to_value(state.jobs.cancel(caller, &job_id).await?),
+        Request::Relay(relay) => relay::handle(state, relay).await,
         Request::Unknown => Err(ErrorBody::new(
             ErrorCode::UnsupportedRequest,
             format!("{} does not know this request method", state.node_id()),

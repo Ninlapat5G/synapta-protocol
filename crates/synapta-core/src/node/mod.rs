@@ -27,7 +27,7 @@ use crate::identity::NodeIdentity;
 use crate::protocol::message::{CapabilityAdvert, Event, InvokeResult, JobInfo, JobSubmitted, NodeAdvert, Request};
 use crate::protocol::{NodeId, WireRange, SOFTWARE_VERSION};
 use crate::registry::{PeerState, PeerView};
-use crate::routing::dispatch::{self, decode, RouteFailure, Routed};
+use crate::routing::dispatch::{self, decode, PeerPath, RouteFailure, Routed};
 use crate::routing::RoutingDecision;
 use crate::trace::{TraceSink, Tracer};
 use crate::transport::tcp::TcpTransport;
@@ -233,9 +233,12 @@ impl NodeHandle {
     }
 
     pub fn status(&self) -> NodeStatus {
+        // Built before taking the registry lock: the advert reads the registry itself.
+        let seq = self.state.own_advert.lock().unwrap().seq;
+        let node = self.state.advert_now(seq);
         let registry = self.state.registry.read().unwrap();
         NodeStatus {
-            node: self.state.advert_now(self.state.own_advert.lock().unwrap().seq),
+            node,
             listen: self.state.listen_addr,
             peers: registry.views(Instant::now()),
             executions: self.state.jobs.executions(),
@@ -303,15 +306,9 @@ impl NodeHandle {
     }
 
     async fn remote_job_call(&self, node: &NodeId, request: Request) -> Result<JobInfo, ErrorBody> {
-        let link = self
-            .state
-            .registry
-            .read()
-            .unwrap()
-            .ready_link(node)
+        let path = PeerPath::to(&self.state, node)
             .ok_or_else(|| ErrorBody::new(ErrorCode::TargetUnavailable, format!("{node} is not reachable")))?;
-        let timeout = ms(self.state.config.timeouts.request_ms);
-        decode(link.call(request, timeout).await?)
+        decode(path.call(&self.state, request).await?)
     }
 
     /// Waits (without polling) until `condition` holds for the node status, or `timeout` passes.

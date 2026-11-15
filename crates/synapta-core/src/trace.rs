@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::discovery::advert;
 use crate::error::ErrorCode;
-use crate::protocol::message::{Event, Frame, Notification, Request};
+use crate::protocol::message::{Envelope, Event, Frame, Notification, Request};
 use crate::protocol::NodeId;
 
 /// Receives every trace event. Called on the node's own tasks, so it must return quickly and
@@ -148,6 +148,12 @@ fn request_detail(request: &Request) -> Option<String> {
             Some(job_id.clone())
         }
         Request::SyncAdverts { adverts } => Some(format!("{} adverts", adverts.len())),
+        Request::Relay(relay) => {
+            let inner = serde_json::from_str::<Envelope>(&relay.envelope.payload)
+                .map(|e| format!(" {} from {}", e.request.method(), e.from))
+                .unwrap_or_default();
+            Some(format!("to {}{inner}", relay.to))
+        }
         Request::Ping | Request::Unknown => None,
     }
 }

@@ -19,6 +19,7 @@ use crate::protocol::message::{CapabilityAdvert, MemberCard, NodeAdvert, Resourc
 use crate::protocol::{NodeId, WireRange, SOFTWARE_VERSION};
 use crate::registry::Registry;
 use crate::routing::ledger::DispatchLedger;
+use crate::routing::relay::SeenNonces;
 use crate::routing::RoutingDecision;
 use crate::trace::Tracer;
 use crate::transport::{AddressPolicy, Transport};
@@ -49,6 +50,8 @@ pub(crate) struct NodeState {
     /// Addresses with a running dialer task (at most one per address), each with the signal
     /// that cuts its current wait short.
     pub dialers: Mutex<HashMap<SocketAddr, Arc<Notify>>>,
+    /// Relayed envelopes already delivered here (replay guard).
+    pub relay_nonces: Mutex<SeenNonces>,
     pub tracer: Tracer,
     pub shutdown: CancellationToken,
     pub tasks: TaskTracker,
@@ -88,6 +91,7 @@ impl NodeState {
             registry_version: watch::channel(0).0,
             own_advert: Mutex::new(OwnAdvert { seq: 0, signed: None }),
             dialers: Mutex::new(HashMap::new()),
+            relay_nonces: Mutex::new(SeenNonces::default()),
             config: parts.config,
             identity: parts.identity,
             card: parts.card,
@@ -119,9 +123,18 @@ impl NodeState {
         self.registry_version.subscribe()
     }
 
-    /// This node's advert as of now (live job count). `seq` is filled by the publisher.
+    /// This node's advert as of now (live job count and links). `seq` is filled by the
+    /// publisher. Takes the registry lock: never call it while holding that lock.
     pub fn advert_now(&self, seq: u64) -> NodeAdvert {
         let r = &self.config.resources;
+        let neighbors = self
+            .registry
+            .read()
+            .unwrap()
+            .ready_links()
+            .iter()
+            .map(|link| link.peer().clone())
+            .collect();
         NodeAdvert {
             node_id: self.node_id().clone(),
             name: self.config.node.name.clone(),
@@ -132,6 +145,7 @@ impl NodeState {
             incarnation: self.incarnation,
             seq,
             capabilities: self.capabilities.clone(),
+            neighbors,
             resources: ResourceState {
                 cpu_percent: r.cpu_percent,
                 memory_available_mb: r.memory_available_mb,

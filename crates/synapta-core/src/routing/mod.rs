@@ -7,6 +7,8 @@
 
 pub mod dispatch;
 pub mod ledger;
+pub mod paths;
+pub(crate) mod relay;
 
 use std::collections::BTreeMap;
 
@@ -44,7 +46,7 @@ pub enum Rejection {
     CapabilityNotAdvertised,
     /// The node's access list for this capability does not include the caller.
     NotAllowed,
-    /// No READY link from this node to the candidate.
+    /// No READY link from this node to the candidate, and no path through other nodes.
     LinkNotReady {
         state: PeerState,
     },
@@ -100,6 +102,12 @@ pub struct CandidateReport {
     #[serde(skip_serializing_if = "is_zero")]
     pub unseen_jobs: i32,
     pub cpu_percent: u8,
+    /// 0 = this node, 1 = direct link, more = relayed through other nodes. Breaks load ties:
+    /// fewer hops first.
+    pub hops: u32,
+    /// First hop of a relayed path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<NodeId>,
     /// Ordinal of this node's latest dispatch there. Breaks load ties: least recent goes first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_dispatch: Option<u64>,
@@ -146,6 +154,7 @@ impl RoutingDecision {
 }
 
 pub fn decide(view: &ClusterView, caller: &NodeId, capability: &str, target: Option<&NodeId>) -> RoutingDecision {
+    let routes = paths::from_snapshots(&view.local.node_id, &view.peers);
     let mut decision = RoutingDecision {
         capability: capability.to_string(),
         mode: if target.is_some() {
@@ -162,30 +171,39 @@ pub fn decide(view: &ClusterView, caller: &NodeId, capability: &str, target: Opt
         attempts: Vec::new(),
     };
 
+    let context = Context {
+        view,
+        routes: &routes,
+        caller,
+        capability,
+    };
     match target {
-        Some(target) => decide_explicit(view, caller, capability, target, &mut decision),
-        None => decide_automatic(view, caller, capability, &mut decision),
+        Some(target) => decide_explicit(&context, target, &mut decision),
+        None => decide_automatic(&context, &mut decision),
     }
     decision
 }
 
+/// What every candidate is judged against.
+struct Context<'a> {
+    view: &'a ClusterView,
+    routes: &'a BTreeMap<NodeId, paths::Route>,
+    caller: &'a NodeId,
+    capability: &'a str,
+}
+
 /// Explicit target: evaluate that node only. Never substitute another node.
-fn decide_explicit(
-    view: &ClusterView,
-    caller: &NodeId,
-    capability: &str,
-    target: &NodeId,
-    decision: &mut RoutingDecision,
-) {
+fn decide_explicit(context: &Context, target: &NodeId, decision: &mut RoutingDecision) {
+    let (view, capability) = (context.view, context.capability);
     let report = if &view.local.node_id == target {
-        evaluate(view, &view.local, None, caller, capability)
+        evaluate(context, &view.local, None)
     } else {
         match view.peers.iter().find(|p| &p.node_id == target) {
             Some(PeerSnapshot {
                 advert: Some(advert),
                 state,
                 ..
-            }) => evaluate(view, advert, Some(*state), caller, capability),
+            }) => evaluate(context, advert, Some(*state)),
             _ => {
                 decision.error = Some(ErrorBody::new(
                     ErrorCode::TargetNotFound,
@@ -205,7 +223,8 @@ fn decide_explicit(
     });
 }
 
-fn decide_automatic(view: &ClusterView, caller: &NodeId, capability: &str, decision: &mut RoutingDecision) {
+fn decide_automatic(context: &Context, decision: &mut RoutingDecision) {
+    let (view, capability) = (context.view, context.capability);
     let local = std::iter::once((&view.local, None));
     let peers = view
         .peers
@@ -216,21 +235,20 @@ fn decide_automatic(view: &ClusterView, caller: &NodeId, capability: &str, decis
             decision.nodes_without_capability += 1;
             continue;
         }
-        decision
-            .candidates
-            .push(evaluate(view, advert, link_state, caller, capability));
+        decision.candidates.push(evaluate(context, advert, link_state));
     }
 
-    // The whole policy is this sort key. Equal load goes to the node this caller sent to least
-    // recently (never-sent first), so idle nodes take turns. Node id is unique, so the order is
-    // total.
+    // The whole policy is this sort key. Equal load goes to the nearer node, then to the one this
+    // caller sent to least recently (never-sent first), so idle nodes take turns. Node id is
+    // unique, so the order is total.
     let mut eligible: Vec<usize> = (0..decision.candidates.len())
         .filter(|&i| decision.candidates[i].eligible)
         .collect();
     eligible.sort_by(|&a, &b| {
         let (a, b) = (&decision.candidates[a], &decision.candidates[b]);
-        (a.load_permille, a.cpu_percent, a.last_dispatch, &a.node_id).cmp(&(
+        (a.load_permille, a.hops, a.cpu_percent, a.last_dispatch, &a.node_id).cmp(&(
             b.load_permille,
+            b.hops,
             b.cpu_percent,
             b.last_dispatch,
             &b.node_id,
@@ -262,14 +280,19 @@ fn decide_automatic(view: &ClusterView, caller: &NodeId, capability: &str, decis
     }
 }
 
-/// `link_state` is `None` for the local node (always reachable).
-fn evaluate(
-    view: &ClusterView,
-    advert: &NodeAdvert,
-    link_state: Option<PeerState>,
-    caller: &NodeId,
-    capability: &str,
-) -> CandidateReport {
+/// `link_state` is `None` for the local node (always reachable). A peer without a READY link
+/// is still reachable when a path through other nodes leads to it.
+fn evaluate(context: &Context, advert: &NodeAdvert, link_state: Option<PeerState>) -> CandidateReport {
+    let (view, caller, capability) = (context.view, context.caller, context.capability);
+    let (hops, via) = match link_state {
+        None => (0, None),
+        Some(PeerState::Ready) => (1, None),
+        Some(_) => match context.routes.get(&advert.node_id) {
+            Some(route) => (route.hops, Some(route.next_hop.clone())),
+            None => (0, None),
+        },
+    };
+    let reachable = link_state.is_none() || hops > 0;
     let r = &advert.resources;
     let ledger = view.ledger.get(&advert.node_id).copied().unwrap_or_default();
     let active_jobs = r.active_jobs.saturating_add_signed(ledger.unseen_jobs);
@@ -279,7 +302,7 @@ fn evaluate(
         // A node may always call its own capabilities.
         Some(cap) if link_state.is_some() && !cap.allows(caller) => Some(Rejection::NotAllowed),
         Some(_) => match link_state {
-            Some(state) if state != PeerState::Ready => Some(Rejection::LinkNotReady { state }),
+            Some(state) if !reachable => Some(Rejection::LinkNotReady { state }),
             _ if r.availability != Availability::Available => Some(Rejection::NotAvailable {
                 availability: r.availability,
             }),
@@ -300,6 +323,8 @@ fn evaluate(
         // doesn't show up in the report.
         unseen_jobs: (i64::from(active_jobs) - i64::from(r.active_jobs)) as i32,
         cpu_percent: r.cpu_percent,
+        hops,
+        via,
         last_dispatch: ledger.last_dispatch,
         rank: None,
     }
@@ -336,6 +361,7 @@ mod tests {
                     allow: vec!["*".into()],
                 })
                 .collect(),
+            neighbors: vec![],
             resources: ResourceState {
                 cpu_percent: cpu,
                 memory_available_mb: 1024,

@@ -47,6 +47,10 @@ pub enum ErrorCode {
     /// The receiving node does not know this request method (it runs an older release).
     /// Nothing was executed.
     UnsupportedRequest,
+    /// A relay hop has no path to the target. Nothing was executed.
+    Unreachable,
+    /// A relayed request ran out of hops before reaching its target. Nothing was executed.
+    TtlExceeded,
     /// A code this build does not know, sent by a newer peer. Never sent by this build.
     #[serde(other)]
     Unknown,
@@ -57,7 +61,7 @@ impl ErrorCode {
     /// Automatic routing may safely try the next candidate after these; for every other
     /// failure the request may already have executed, so retrying could run it twice.
     pub fn is_pre_execution_rejection(self) -> bool {
-        matches!(self, ErrorCode::Busy)
+        matches!(self, ErrorCode::Busy | ErrorCode::Unreachable | ErrorCode::TtlExceeded)
     }
 }
 

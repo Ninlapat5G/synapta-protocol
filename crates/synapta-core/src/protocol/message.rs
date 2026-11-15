@@ -116,7 +116,7 @@ pub enum Request {
     #[serde(rename = "adverts.sync")]
     SyncAdverts { adverts: Vec<SignedAdvert> },
     /// Execute a capability on the receiving node and wait for the result.
-    /// The receiver never forwards: it executes locally or rejects (no multi-hop in v0.0.1).
+    /// The receiver executes it or refuses; it never passes it on (that is what `relay` is for).
     #[serde(rename = "invoke")]
     Invoke { capability: String, input: Value },
     #[serde(rename = "job.submit")]
@@ -128,6 +128,9 @@ pub enum Request {
     JobResult { job_id: String, wait_ms: u64 },
     #[serde(rename = "job.cancel")]
     JobCancel { job_id: String },
+    /// A request for a node the sender has no link to, passed on hop by hop (`routing::relay`).
+    #[serde(rename = "relay")]
+    Relay(RelayRequest),
     /// A method this build does not know. Answered with `unsupported_request`; never sent.
     #[serde(skip)]
     Unknown,
@@ -144,6 +147,7 @@ impl Request {
         "job.status",
         "job.result",
         "job.cancel",
+        "relay",
     ];
 
     /// The wire name of this request's method; `"unknown"` for one this build does not know.
@@ -156,12 +160,58 @@ impl Request {
             Request::JobStatus { .. } => "job.status",
             Request::JobResult { .. } => "job.result",
             Request::JobCancel { .. } => "job.cancel",
+            Request::Relay(_) => "relay",
             Request::Unknown => "unknown",
         }
     }
 }
 
 with_unknown_methods!(Request);
+
+/// `relay` params. The answer to a relay request is a [`SignedPayload`] holding a
+/// [`RelayReply`], signed by `to`, or an unsigned error from a hop that could not pass it on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelayRequest {
+    /// The node that must execute it.
+    pub to: NodeId,
+    /// Hops left. A hop that would have to pass it on with none left answers `ttl_exceeded`.
+    pub ttl: u8,
+    /// An [`Envelope`], signed by the node that sent it first.
+    pub envelope: SignedPayload,
+}
+
+/// JSON text and a signature over it by the node the JSON names as its author.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignedPayload {
+    pub payload: String,
+    pub signature: String,
+}
+
+/// Who asks what of whom. Signed by `from`, so the hops in between can neither change it nor
+/// pretend to be `from` (capability access lists check `from`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Envelope {
+    pub from: NodeId,
+    pub to: NodeId,
+    /// Random, hex. `to` refuses an envelope it has already seen (until it expires).
+    pub nonce: String,
+    /// Unix time in ms after which `to` refuses it.
+    pub expires_at_ms: u64,
+    pub request: Request,
+}
+
+/// What `to` answered. Signed by `to`, so `from` knows no hop made it up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelayReply {
+    pub from: NodeId,
+    pub to: NodeId,
+    /// The envelope's nonce: ties this reply to that request.
+    pub nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorBody>,
+}
 
 /// Exactly one of `result` / `error` is present.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -265,6 +315,10 @@ pub struct NodeAdvert {
     pub incarnation: u64,
     pub seq: u64,
     pub capabilities: Vec<CapabilityAdvert>,
+    /// Nodes this node has a READY link to, sorted. Every node builds the whole graph from
+    /// these and routes to nodes it cannot reach directly (`routing::paths`).
+    #[serde(default)]
+    pub neighbors: Vec<NodeId>,
     pub resources: ResourceState,
 }
 
@@ -480,6 +534,14 @@ mod tests {
                 wait_ms: 1,
             },
             Request::JobCancel { job_id: "j".into() },
+            Request::Relay(RelayRequest {
+                to: NodeId::new("node-z").unwrap(),
+                ttl: 3,
+                envelope: SignedPayload {
+                    payload: "{}".into(),
+                    signature: "00".into(),
+                },
+            }),
         ];
         assert_eq!(requests.len(), Request::METHODS.len(), "a sample per method");
         for request in requests {

@@ -200,6 +200,7 @@ mod tests {
             incarnation: 1,
             seq,
             capabilities: vec![],
+            neighbors: vec![],
             resources: ResourceState {
                 cpu_percent: 0,
                 memory_available_mb: 0,

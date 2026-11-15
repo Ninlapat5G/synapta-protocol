@@ -582,9 +582,14 @@ mod tests {
             read_noise(&mut noise, &hello.noise).unwrap();
             let mut buf = [0u8; NOISE_MESSAGE_MAX];
             let len = noise.write_message(&[], &mut buf).unwrap();
+            // Offers this build's version and an older one, then picks the older one.
+            let current = WireRange::SUPPORTED.max;
             let ack = HelloAck {
-                wire: WireRange { min: 2, max: 3 },
-                wire_version: 2,
+                wire: WireRange {
+                    min: current - 1,
+                    max: current,
+                },
+                wire_version: current - 1,
                 node_id: b.identity.node_id.clone(),
                 noise: to_hex(&buf[..len]),
                 card: None,
@@ -594,7 +599,8 @@ mod tests {
         let (dialed, ()) = tokio::join!(dial(&mut d, &ap, None), fake_acceptor);
         let refused = dialed.err().unwrap();
         assert_eq!(refused.code, ErrorCode::HandshakeFailed);
-        assert!(refused.message.contains("chose wire version 2"), "{}", refused.message);
+        let chose = format!("chose wire version {}", WireRange::SUPPORTED.max - 1);
+        assert!(refused.message.contains(&chose), "{}", refused.message);
     }
 
     /// Before the peer is authenticated, the node-wide frame limit (1 MiB here) does not apply.

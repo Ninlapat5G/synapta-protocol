@@ -119,6 +119,7 @@ async fn a_node_on_another_wire_version_is_known_but_not_dialled() {
         incarnation: 1,
         seq: 1,
         capabilities: vec![],
+        neighbors: vec![],
         resources: ResourceState {
             cpu_percent: 0,
             memory_available_mb: 0,

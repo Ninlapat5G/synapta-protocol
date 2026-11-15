@@ -150,3 +150,20 @@ HTML + JS ธรรมดา ฝังในโปรแกรม ไม่ต�
 - เพิกถอนบัตรสมาชิกก่อนหมดอายุ
 - ให้ผู้ใช้เขียน capability เอง (= รันโค้ดคนอื่นบนเครื่อง ขัดข้อห้าม)
 - จำลองความหน่วง/packet loss ของสาย (เพิ่มทีหลังได้ใน connector ถ้าต้องการ)
+
+## ความคืบหน้า
+
+| ขั้น | สถานะ | commit |
+|---|---|---|
+| M1 ประตูเครือข่าย + trace | เสร็จ | a2c4711 |
+| M2 บัตรสมาชิก | เสร็จ | 21c44c9 |
+| M3 relay + routing ข้ามวง (wire 4) | เสร็จ | ดู git log |
+| M4 synapta-lab backend | ยังไม่เริ่ม | |
+| M5 หน้าเว็บ | ยังไม่เริ่ม | |
+| M6 สถานการณ์สำเร็จรูป + วัดขนาด + เอกสาร | ยังไม่เริ่ม | |
+
+เอกสารที่ต้องอัปเดตใน M6 (ยังไม่ได้แก้ตาม M1–M3): `docs/protocol.md` (wire 4, `relay`, `neighbors`,
+บัตรสมาชิกใน hello/advert, error `unreachable`/`ttl_exceeded`), `docs/routing.md` (hops ในลำดับคะแนน,
+เส้นทางผ่าน relay), `docs/architecture.md` (trace, sim transport, relay, membership), `docs/roadmap.md`
+(ข้อจำกัด: job event ไม่ข้าม relay, เพิกถอนบัตรไม่ได้, นาฬิกาเครื่องต่างกันมีผลกับอายุ envelope),
+`docs/test-report.md`, `README.md`, version 0.0.4 ใน Cargo.toml

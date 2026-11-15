@@ -1,9 +1,9 @@
-//! Carries out a routing decision: run locally or send over the READY link, and record the
-//! decision (with every attempt) in the log.
+//! Carries out a routing decision: run locally, send over the READY link, or relay through the
+//! nodes on the path (`relay`), and record the decision (with every attempt) in the log.
 //!
 //! Delivery is at-most-once. Automatic routing moves on to the next ranked candidate only when
-//! the chosen node provably did not run anything: its link was not READY at dispatch time, or
-//! it answered `Busy`. After any other failure (timeout, lost connection) the request may have
+//! the chosen node provably did not run anything: there was no way to reach it at dispatch time,
+//! it answered `Busy`, or a relay hop answered `unreachable` / `ttl_exceeded`. After any other failure (timeout, lost connection) the request may have
 //! run, so it is reported, not retried elsewhere. Explicit targets are never substituted.
 
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{decide, Attempt, ClusterView, RoutingDecision, RoutingMode};
+use super::{decide, paths, relay, Attempt, ClusterView, RoutingDecision, RoutingMode};
 use crate::config::ms;
 use crate::discovery::link::LinkHandle;
 use crate::error::{ErrorBody, ErrorCode};
@@ -73,14 +73,13 @@ pub(crate) async fn invoke(
                         output,
                     })
                 }
-                Destination::Remote(link) => {
+                Destination::Remote(path) => {
                     let request = Request::Invoke {
                         capability: capability.to_string(),
                         input,
                     };
-                    let value = link.call(request, remote_timeout(state)).await?;
-                    let result: InvokeResult = decode(value)?;
-                    check_executor(&link, &result.executed_by)?;
+                    let result: InvokeResult = decode(path.call(state, request).await?)?;
+                    path.check_executor(&result.executed_by)?;
                     Ok(result)
                 }
             }
@@ -112,13 +111,13 @@ pub(crate) async fn submit(
                         job_id,
                     })
                 }
-                Destination::Remote(link) => {
+                Destination::Remote(path) => {
                     let request = Request::JobSubmit {
                         capability: capability.to_string(),
                         input,
                     };
-                    let submitted: JobSubmitted = decode(link.call(request, remote_timeout(state)).await?)?;
-                    check_executor(&link, &submitted.executed_by)?;
+                    let submitted: JobSubmitted = decode(path.call(state, request).await?)?;
+                    path.check_executor(&submitted.executed_by)?;
                     Ok(submitted)
                 }
             }
@@ -129,7 +128,57 @@ pub(crate) async fn submit(
 
 enum Destination {
     Local,
-    Remote(LinkHandle),
+    Remote(PeerPath),
+}
+
+/// The way to another node right now: its own READY link, or the link to the first hop of a
+/// relayed path.
+pub(crate) struct PeerPath {
+    target: NodeId,
+    link: LinkHandle,
+    /// 1 = direct.
+    hops: u32,
+}
+
+impl PeerPath {
+    /// Finds the way to `node` as of now; None if there is none.
+    pub(crate) fn to(state: &NodeState, node: &NodeId) -> Option<PeerPath> {
+        let direct = state.registry.read().unwrap().ready_link(node);
+        if let Some(link) = direct {
+            return Some(PeerPath {
+                target: node.clone(),
+                link,
+                hops: 1,
+            });
+        }
+        let route = paths::current(state).remove(node)?;
+        let link = state.registry.read().unwrap().ready_link(&route.next_hop)?;
+        Some(PeerPath {
+            target: node.clone(),
+            link,
+            hops: route.hops,
+        })
+    }
+
+    pub(crate) async fn call(&self, state: &Arc<NodeState>, request: Request) -> Result<Value, ErrorBody> {
+        if self.hops == 1 {
+            self.link.call(request, remote_timeout(state)).await
+        } else {
+            relay::call(state, &self.link, &self.target, self.hops, request).await
+        }
+    }
+
+    /// The executing node reports who ran the job; it must be the node we sent it to.
+    fn check_executor(&self, executed_by: &NodeId) -> Result<(), ErrorBody> {
+        if executed_by == &self.target {
+            Ok(())
+        } else {
+            Err(ErrorBody::new(
+                ErrorCode::Internal,
+                format!("{} reported the job as executed by {executed_by}", self.target),
+            ))
+        }
+    }
 }
 
 /// What a successful answer means for the executing node's load (see `ledger`).
@@ -165,14 +214,16 @@ where
         let (destination, sent_at) = if &node == state.node_id() {
             (Destination::Local, None)
         } else {
-            let registry = state.registry.read().unwrap();
-            match registry.ready_link(&node) {
-                Some(link) => (Destination::Remote(link), registry.advert_version(&node)),
+            match PeerPath::to(state, &node) {
+                Some(path) => (
+                    Destination::Remote(path),
+                    state.registry.read().unwrap().advert_version(&node),
+                ),
                 None => {
-                    // Became unavailable between deciding and sending: nothing was sent.
+                    // Became unreachable between deciding and sending: nothing was sent.
                     decision
                         .attempts
-                        .push(attempt(&node, "link not READY at dispatch; not sent"));
+                        .push(attempt(&node, "no way to reach it at dispatch; not sent"));
                     if decision.mode == RoutingMode::Explicit {
                         let error = ErrorBody::new(ErrorCode::TargetUnavailable, format!("{node} became unavailable"));
                         return Err(fail(state, decision, error));
@@ -237,18 +288,6 @@ fn attempt(node: &NodeId, outcome: &str) -> Attempt {
 
 fn remote_timeout(state: &NodeState) -> Duration {
     ms(state.config.timeouts.request_ms) + REMOTE_CALL_GRACE
-}
-
-/// The executing node reports who ran the job; it must be the node we are linked to.
-fn check_executor(link: &LinkHandle, executed_by: &NodeId) -> Result<(), ErrorBody> {
-    if executed_by == link.peer() {
-        Ok(())
-    } else {
-        Err(ErrorBody::new(
-            ErrorCode::Internal,
-            format!("{} reported the job as executed by {executed_by}", link.peer()),
-        ))
-    }
 }
 
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ErrorBody> {
