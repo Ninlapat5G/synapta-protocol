@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 
 use serde_json::{json, Value};
 use synapta_core::protocol::message::CapabilityAdvert;
-use synapta_core::protocol::PROTOCOL_VERSION;
+use synapta_core::protocol::SOFTWARE_VERSION;
 use synapta_core::NodeStatus;
 
 /// UTCP specification version this manual follows (the SDK does not gate on it).
@@ -45,7 +45,7 @@ pub fn manual(status: &NodeStatus, api_addr: SocketAddr) -> Value {
         .collect();
     json!({
         "utcp_version": UTCP_VERSION,
-        "manual_version": PROTOCOL_VERSION,
+        "manual_version": SOFTWARE_VERSION,
         "tools": tools,
     })
 }

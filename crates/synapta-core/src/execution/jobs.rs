@@ -167,6 +167,11 @@ impl JobManager {
     }
 
     /// Synchronous execution: submit, wait up to `timeout`, cancel if it is still running.
+    ///
+    /// The record is dropped as soon as the call is answered — the caller has the outcome and
+    /// nothing can ask for it again. Kept for the retention period (as they once were), these
+    /// records filled the table under steady `invoke` traffic and pushed out the results of
+    /// finished async jobs before their owners had fetched them.
     pub async fn run(
         &self,
         owner: NodeId,
@@ -176,18 +181,28 @@ impl JobManager {
     ) -> Result<(String, Value), ErrorBody> {
         let job_id = self.submit(owner.clone(), executor, input, None)?;
         let info = self.wait(&owner, &job_id, timeout).await?;
-        match info.state {
-            JobState::Succeeded => Ok((job_id, info.output.unwrap_or(Value::Null))),
-            JobState::Running => {
-                self.cancel(&owner, &job_id).await?;
+        let outcome = match info.state {
+            JobState::Succeeded => Ok((job_id.clone(), info.output.unwrap_or(Value::Null))),
+            JobState::Running => self.cancel(&owner, &job_id).await.and_then(|_| {
                 Err(ErrorBody::new(
                     ErrorCode::Timeout,
                     format!("no result within {} ms", timeout.as_millis()),
                 ))
-            }
+            }),
             _ => Err(info
                 .error
                 .unwrap_or_else(|| ErrorBody::new(ErrorCode::ExecutionFailed, "job failed"))),
+        };
+        self.forget_finished(&job_id);
+        outcome
+    }
+
+    /// Drops the record of a job that has ended. One still running stays, so it keeps counting
+    /// against capacity until it really stops.
+    fn forget_finished(&self, job_id: &str) {
+        let mut jobs = self.inner.jobs.lock().unwrap();
+        if jobs.get(job_id).is_some_and(|j| j.finished.is_some()) {
+            jobs.remove(job_id);
         }
     }
 
@@ -433,19 +448,64 @@ mod tests {
     #[tokio::test]
     async fn finished_jobs_are_swept_after_retention() {
         let jobs = manager(2, 10);
-        let (id, out) = jobs
-            .run(
-                owner(),
-                executor("math.add"),
-                json!({"a": 1, "b": 2}),
-                Duration::from_secs(1),
-            )
-            .await
+        let id = jobs
+            .submit(owner(), executor("math.add"), json!({"a": 1, "b": 2}), None)
             .unwrap();
-        assert_eq!(out, json!({"sum": 3}));
+        let info = jobs.wait(&owner(), &id, Duration::from_secs(1)).await.unwrap();
+        assert_eq!(info.output, Some(json!({"sum": 3})));
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(jobs.sweep(Instant::now()), 1);
         assert_eq!(jobs.status(&owner(), &id).unwrap_err().code, ErrorCode::JobNotFound);
+    }
+
+    /// Regression: sync calls used to stay in the table until retention ran out, and a full
+    /// table evicts the oldest finished record — an async result nobody had fetched yet.
+    #[tokio::test]
+    async fn sync_calls_never_push_out_an_unfetched_async_result() {
+        let jobs = JobManager::new(
+            NodeId::new("node-b").unwrap(),
+            JobLimits {
+                max_concurrent: 2,
+                max_duration: Duration::from_secs(30),
+                retention: Duration::from_secs(60),
+                max_retained: 5,
+            },
+            Arc::new(Notify::new()),
+            TaskTracker::new(),
+            CancellationToken::new(),
+        );
+        let async_job = jobs
+            .submit(owner(), executor("math.add"), json!({"a": 1, "b": 1}), None)
+            .unwrap();
+        jobs.wait(&owner(), &async_job, Duration::from_secs(1)).await.unwrap();
+        for i in 0..20 {
+            let (_, out) = jobs
+                .run(
+                    owner(),
+                    executor("math.add"),
+                    json!({"a": i, "b": 1}),
+                    Duration::from_secs(1),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out, json!({"sum": i + 1}));
+        }
+        assert_eq!(jobs.status(&owner(), &async_job).unwrap().state, JobState::Succeeded);
+        assert_eq!(jobs.retained_count(), 1, "sync calls leave nothing behind");
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_sync_call_leaves_nothing_behind() {
+        let jobs = manager(2, 60_000);
+        jobs.run(
+            owner(),
+            executor("test.execute"),
+            json!({"suite": "unit", "steps": 100, "step_ms": 50}),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(jobs.retained_count(), 0);
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::config::ms;
 use crate::discovery::flooding;
 use crate::discovery::link::SyncAdvertsResult;
-use crate::error::ErrorBody;
+use crate::error::{ErrorBody, ErrorCode};
 use crate::execution::EventSink;
 use crate::node::state::NodeState;
 use crate::protocol::message::{InvokeResult, JobSubmitted, Request};
@@ -24,7 +24,7 @@ pub(crate) async fn handle_request(
 ) -> Result<Value, ErrorBody> {
     let request_timeout = ms(state.config.timeouts.request_ms);
     match request {
-        Request::Ping => Ok(json!({})),
+        Request::Ping => Ok(pong()),
         Request::SyncAdverts { adverts } => {
             for signed in adverts {
                 if let Err(e) = flooding::accept_advert(state, signed, Some(caller)) {
@@ -59,9 +59,18 @@ pub(crate) async fn handle_request(
             to_value(state.jobs.wait(caller, &job_id, wait).await?)
         }
         Request::JobCancel { job_id } => to_value(state.jobs.cancel(caller, &job_id).await?),
+        Request::Unknown => Err(ErrorBody::new(
+            ErrorCode::UnsupportedRequest,
+            format!("{} does not know this request method", state.node_id()),
+        )),
     }
 }
 
+/// The answer to `ping`. The server sends it without going through `handle_request`.
+pub(crate) fn pong() -> Value {
+    json!({})
+}
+
 fn to_value<T: serde::Serialize>(value: T) -> Result<Value, ErrorBody> {
-    serde_json::to_value(value).map_err(|e| ErrorBody::new(crate::error::ErrorCode::Internal, e.to_string()))
+    serde_json::to_value(value).map_err(|e| ErrorBody::new(ErrorCode::Internal, e.to_string()))
 }

@@ -218,14 +218,15 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::protocol::message::{Availability, ResourceState};
-    use crate::protocol::{NodeType, PROTOCOL_VERSION};
+    use crate::protocol::{NodeType, WireRange, SOFTWARE_VERSION};
 
     fn advert(incarnation: u64, seq: u64, address: &str) -> (NodeAdvert, SignedAdvert) {
         let advert = NodeAdvert {
             node_id: NodeId::new("node-b").unwrap(),
             name: "B".into(),
             node_type: NodeType::Server,
-            protocol_version: PROTOCOL_VERSION.into(),
+            software_version: SOFTWARE_VERSION.into(),
+            wire: WireRange::SUPPORTED,
             address: address.into(),
             incarnation,
             seq,

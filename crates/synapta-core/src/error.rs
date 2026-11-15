@@ -44,6 +44,12 @@ pub enum ErrorCode {
     ExecutionFailed,
     ShuttingDown,
     Internal,
+    /// The receiving node does not know this request method (it runs an older release).
+    /// Nothing was executed.
+    UnsupportedRequest,
+    /// A code this build does not know, sent by a newer peer. Never sent by this build.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ErrorCode {

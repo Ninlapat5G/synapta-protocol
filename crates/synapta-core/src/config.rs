@@ -83,8 +83,11 @@ pub struct Timeouts {
     pub idle_timeout_ms: u64,
     pub reconnect_base_ms: u64,
     pub reconnect_max_ms: u64,
-    /// Consecutive failed attempts before a dialer gives up until a newer advert arrives.
+    /// Consecutive failed attempts before a dialer gives up until a newer advert arrives
+    /// (learned addresses) or slows down to `seed_retry_ms` (seeds).
     pub max_reconnect_attempts: u32,
+    /// How often a seed that keeps failing is tried again. Seeds are never given up on.
+    pub seed_retry_ms: u64,
     pub advert_refresh_ms: u64,
     /// Adverts not refreshed for this long are dropped (peer forgotten unless linked).
     pub advert_max_age_ms: u64,
@@ -107,6 +110,7 @@ impl Default for Timeouts {
             reconnect_base_ms: 100,
             reconnect_max_ms: 2_000,
             max_reconnect_attempts: 30,
+            seed_retry_ms: 30_000,
             advert_refresh_ms: 5_000,
             advert_max_age_ms: 30_000,
             advert_min_interval_ms: 100,
@@ -266,6 +270,7 @@ impl NodeConfig {
             ("idle_timeout_ms", t.idle_timeout_ms),
             ("reconnect_base_ms", t.reconnect_base_ms),
             ("reconnect_max_ms", t.reconnect_max_ms),
+            ("seed_retry_ms", t.seed_retry_ms),
             ("advert_refresh_ms", t.advert_refresh_ms),
             ("advert_max_age_ms", t.advert_max_age_ms),
             ("job_retention_ms", t.job_retention_ms),

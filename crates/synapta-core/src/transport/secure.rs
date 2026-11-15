@@ -41,8 +41,8 @@ pub fn channel(transport: StatelessTransportState, max_frame_bytes: usize) -> (S
         cipher,
         next_nonce: 0,
         max_frame_bytes,
-        sealed: vec![0; MAX_RECORD],
-        plain: vec![0; MAX_RECORD],
+        sealed: Vec::new(),
+        plain: Vec::new(),
     };
     (sealer, opener)
 }
@@ -55,12 +55,22 @@ pub struct Sealer {
 }
 
 impl Sealer {
+    pub fn set_max_frame_bytes(&mut self, max_frame_bytes: usize) {
+        self.max_frame_bytes = max_frame_bytes;
+    }
+
     pub async fn write_frame<W: AsyncWrite + Unpin>(
         &mut self,
         writer: &mut W,
         frame: &Frame,
     ) -> Result<(), FrameError> {
         let body = framing::encode(frame, self.max_frame_bytes)?;
+        self.write_body(writer, &body).await
+    }
+
+    /// Seals frame JSON that is already encoded. `write_frame` is the normal way in; this exists
+    /// so tests can send what a newer version of the protocol might.
+    pub async fn write_body<W: AsyncWrite + Unpin>(&mut self, writer: &mut W, body: &[u8]) -> Result<(), FrameError> {
         // All records of the frame go out in one write.
         let mut out = Vec::with_capacity(body.len() + (body.len() / MAX_CHUNK + 1) * (2 + TAG + 1));
         let mut plain = Vec::with_capacity(MAX_CHUNK + 1);
@@ -90,11 +100,16 @@ pub struct Opener {
     cipher: Arc<StatelessTransportState>,
     next_nonce: u64,
     max_frame_bytes: usize,
+    /// Scratch space for one record, grown to the largest record seen (at most `MAX_RECORD`).
     sealed: Vec<u8>,
     plain: Vec<u8>,
 }
 
 impl Opener {
+    pub fn set_max_frame_bytes(&mut self, max_frame_bytes: usize) {
+        self.max_frame_bytes = max_frame_bytes;
+    }
+
     pub async fn read_frame<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> Result<Frame, FrameError> {
         let mut body = Vec::new();
         loop {
@@ -110,6 +125,10 @@ impl Opener {
             if len <= TAG {
                 // Too short to hold a tag and the flag byte: cannot be a record we sent.
                 return Err(FrameError::Unauthenticated);
+            }
+            if self.sealed.len() < len {
+                self.sealed.resize(len, 0);
+                self.plain.resize(len, 0);
             }
             reader.read_exact(&mut self.sealed[..len]).await?;
             let n = self

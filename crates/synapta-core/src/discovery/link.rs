@@ -6,8 +6,10 @@
 //! state mean exactly "my requests can reach it".
 //!
 //! Liveness: a ping every `heartbeat_interval`; no answer within `heartbeat_timeout` → the link is
-//! closed and the peer becomes UNAVAILABLE. Reconnects back off exponentially and stop after
-//! `max_reconnect_attempts`; a newer advert from that peer starts a new dialer later.
+//! closed and the peer becomes UNAVAILABLE. Reconnects back off exponentially. After
+//! `max_reconnect_attempts` a dialer for an address learned from an advert stops (a newer advert
+//! from that peer starts a new one), while a dialer for a configured seed keeps trying every
+//! `seed_retry_ms` for as long as the node runs.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::io::AsyncWrite;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
 use super::flooding;
@@ -165,17 +167,32 @@ impl Drop for PendingCleanup<'_> {
     }
 }
 
-/// Starts a dialer for `addr` unless one is already running or the address is not allowed.
-pub(crate) fn ensure_dialing(state: &Arc<NodeState>, addr: SocketAddr, expected: Option<NodeId>) {
+/// Why an address is being dialled.
+pub(crate) enum DialTarget {
+    /// From `discovery.seeds`: the configured way into the cluster. Never given up on.
+    Seed,
+    /// From this node's advert: given up on after `max_reconnect_attempts`.
+    Learned(NodeId),
+}
+
+/// Starts a dialer for `addr` unless the address is not allowed. If one is already running, it
+/// is told to retry now rather than sit out its current wait.
+pub(crate) fn ensure_dialing(state: &Arc<NodeState>, addr: SocketAddr, target: DialTarget) {
     if state.shutdown.is_cancelled() || addr == state.listen_addr || state.policy.check(&addr).is_err() {
         return;
     }
-    if !state.dialers.lock().unwrap().insert(addr) {
-        return;
+    let retry_now = Arc::new(Notify::new());
+    {
+        let mut dialers = state.dialers.lock().unwrap();
+        if let Some(running) = dialers.get(&addr) {
+            running.notify_one();
+            return;
+        }
+        dialers.insert(addr, retry_now.clone());
     }
     let task_state = state.clone();
     state.tasks.spawn(async move {
-        dial_loop(&task_state, addr, expected).await;
+        dial_loop(&task_state, addr, target, &retry_now).await;
         task_state.dialers.lock().unwrap().remove(&addr);
     });
 }
@@ -186,10 +203,15 @@ enum LinkEnd {
     Lost(String),
 }
 
-async fn dial_loop(state: &Arc<NodeState>, addr: SocketAddr, mut known: Option<NodeId>) {
+async fn dial_loop(state: &Arc<NodeState>, addr: SocketAddr, target: DialTarget, retry_now: &Notify) {
     let t = &state.config.timeouts;
+    let (is_seed, mut known) = match target {
+        DialTarget::Seed => (true, None),
+        DialTarget::Learned(id) => (false, Some(id)),
+    };
     let mut failures: u32 = 0;
     loop {
+        let mut exhausted = false;
         if let Some(id) = &known {
             if state.registry.read().unwrap().is_ready(id) {
                 return; // already linked through another dialer
@@ -216,21 +238,30 @@ async fn dial_loop(state: &Arc<NodeState>, addr: SocketAddr, mut known: Option<N
                 if let Some(id) = &known {
                     set_peer_state(state, id, PeerState::Unavailable, Some(error.message.clone()));
                 }
-                // These will not fix themselves by retrying the same address.
+                // These will not fix themselves by retrying the same address soon.
                 let permanent = matches!(
                     error.code,
                     ErrorCode::UntrustedPeer | ErrorCode::VersionMismatch | ErrorCode::HandshakeFailed
                 );
-                if permanent || failures >= t.max_reconnect_attempts {
+                exhausted = permanent || failures >= t.max_reconnect_attempts;
+                if exhausted && !is_seed {
                     tracing::warn!(%addr, peer = ?known, failures, "giving up on this address until a newer advert arrives");
                     return;
                 }
             }
         }
-        let exponent = failures.saturating_sub(1).min(16);
-        let delay = (t.reconnect_base_ms.saturating_mul(1 << exponent)).min(t.reconnect_max_ms);
+        // A seed is never dropped. It used to be: a node that was away longer than the retry
+        // budget (about a minute) and did not dial in by itself stayed cut off until this node
+        // was restarted. Slow retries also pick a seed up again after it has been upgraded.
+        let delay = if exhausted {
+            t.seed_retry_ms
+        } else {
+            let exponent = failures.saturating_sub(1).min(16);
+            (t.reconnect_base_ms.saturating_mul(1 << exponent)).min(t.reconnect_max_ms)
+        };
         tokio::select! {
             _ = state.shutdown.cancelled() => return,
+            _ = retry_now.notified() => {}
             _ = tokio::time::sleep(ms(delay)) => {}
         }
     }
@@ -296,6 +327,8 @@ async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, session: Sessio
         match frame {
             Ok(Frame::Response(response)) => link.complete(response),
             Ok(Frame::Event(event)) => state.job_events.record(&peer, event),
+            // Something a newer peer sends that this build does not know.
+            Ok(Frame::Unknown) => tracing::debug!(peer = %peer, "ignored a frame of unknown type"),
             Ok(Frame::Error(error)) => break LinkEnd::Lost(format!("peer reported {error}")),
             Ok(_) => break LinkEnd::Lost("protocol violation: unexpected frame on outbound link".into()),
             Err(e) => break LinkEnd::Lost(e.to_string()),

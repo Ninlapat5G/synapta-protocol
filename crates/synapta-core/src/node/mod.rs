@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::config::{ms, NodeConfig};
-use crate::discovery::link::ensure_dialing;
+use crate::discovery::link::{ensure_dialing, DialTarget};
 use crate::discovery::{flooding, server};
 use crate::error::{ErrorBody, ErrorCode};
 use crate::execution::builtin;
@@ -25,7 +25,7 @@ use crate::execution::jobs::{JobLimits, JobManager};
 use crate::execution::ExecutorRegistry;
 use crate::identity::NodeIdentity;
 use crate::protocol::message::{CapabilityAdvert, Event, InvokeResult, JobInfo, JobSubmitted, NodeAdvert, Request};
-use crate::protocol::{NodeId, PROTOCOL_VERSION};
+use crate::protocol::{NodeId, WireRange, SOFTWARE_VERSION};
 use crate::registry::{PeerState, PeerView};
 use crate::routing::dispatch::{self, decode, RouteFailure, Routed};
 use crate::routing::RoutingDecision;
@@ -90,7 +90,7 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle, String> {
     state.tasks.spawn(flooding::run_publisher(state.clone()));
     state.tasks.spawn(run_job_sweeper(state.clone()));
     for seed in seeds {
-        ensure_dialing(&state, seed, None);
+        ensure_dialing(&state, seed, DialTarget::Seed);
     }
     tracing::info!(node = %state.node_id(), listen = %listen_addr, "node started");
     Ok(NodeHandle { state })
@@ -102,7 +102,8 @@ fn offered_capabilities(config: &NodeConfig) -> Result<(ExecutorRegistry, Vec<Ca
         "node_id": config.node.id,
         "name": config.node.name,
         "node_type": config.node.node_type,
-        "protocol_version": PROTOCOL_VERSION,
+        "software_version": SOFTWARE_VERSION,
+        "wire": WireRange::SUPPORTED,
         "capabilities": config.capabilities.iter().map(|c| &c.name).collect::<Vec<_>>(),
         "resources": {
             "cpu_percent": config.resources.cpu_percent,

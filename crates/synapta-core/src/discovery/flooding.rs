@@ -6,7 +6,8 @@
 //! - Freshness: a node re-originates its advert every `advert_refresh_ms` and whenever its load
 //!   changes (coalesced to at most one per `advert_min_interval_ms`). Adverts not refreshed within
 //!   `advert_max_age_ms` are purged for peers without a link.
-//! - Discovery: an accepted advert for a node we have no link to starts a dialer to its address.
+//! - Discovery: an accepted advert for a node we have no link to starts a dialer to its address
+//!   (or hurries the one already waiting to retry), unless it shares no wire version with us.
 //!
 //! Not implemented (v0.0.1 scope): DB-description summaries (sync sends full adverts), areas,
 //! multi-hop routing. Every node links to every node directly.
@@ -15,12 +16,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::advert;
-use super::link::ensure_dialing;
+use super::link::{ensure_dialing, DialTarget};
 use crate::config::ms;
 use crate::error::ErrorBody;
 use crate::node::state::NodeState;
 use crate::protocol::message::{Notification, SignedAdvert};
-use crate::protocol::NodeId;
+use crate::protocol::{NodeId, WireRange};
 use crate::registry::AdvertOutcome;
 
 /// Verifies and stores an advert, floods it onward if new, and dials newly learned nodes.
@@ -39,6 +40,7 @@ pub(crate) fn accept_advert(
     let advert = advert::verify(&signed, &state.trust, state.policy)?;
     let origin = advert.node_id.clone();
     let address = advert.address.parse().ok();
+    let can_talk = WireRange::SUPPORTED.highest_common(advert.wire).is_some();
     let outcome = state
         .registry
         .write()
@@ -53,9 +55,11 @@ pub(crate) fn accept_advert(
     let skip: Vec<&NodeId> = from.into_iter().chain(std::iter::once(&origin)).collect();
     flood(state, &signed, &skip);
 
+    // A node on another wire version stays in the registry (so status can show it) but is not
+    // dialled: every advert it refreshes would otherwise start a handshake that must fail.
     let linked = state.registry.read().unwrap().is_ready(&origin);
-    if let (false, Some(address)) = (linked, address) {
-        ensure_dialing(state, address, Some(origin));
+    if let (false, true, Some(address)) = (linked, can_talk, address) {
+        ensure_dialing(state, address, DialTarget::Learned(origin));
     }
     Ok(true)
 }

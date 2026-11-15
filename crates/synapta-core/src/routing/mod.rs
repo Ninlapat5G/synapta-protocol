@@ -309,7 +309,7 @@ fn evaluate(
 mod tests {
     use super::*;
     use crate::protocol::message::{CapabilityAdvert, ResourceState};
-    use crate::protocol::{NodeType, PROTOCOL_VERSION};
+    use crate::protocol::{NodeType, WireRange, SOFTWARE_VERSION};
     use serde_json::json;
 
     fn id(s: &str) -> NodeId {
@@ -321,7 +321,8 @@ mod tests {
             node_id: id(name),
             name: name.into(),
             node_type: NodeType::Server,
-            protocol_version: PROTOCOL_VERSION.into(),
+            software_version: SOFTWARE_VERSION.into(),
+            wire: WireRange::SUPPORTED,
             address: "127.0.0.1:1".into(),
             incarnation: 1,
             seq: 1,

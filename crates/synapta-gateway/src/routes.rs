@@ -194,6 +194,7 @@ pub fn status_for(code: ErrorCode) -> u16 {
         | ErrorCode::ConnectionLost
         | ErrorCode::ShuttingDown => 503,
         ErrorCode::Timeout => 504,
+        ErrorCode::UnsupportedRequest => 501,
         _ => 500,
     }
 }

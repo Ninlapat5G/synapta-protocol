@@ -1,4 +1,4 @@
-# Architecture — Synapta Protocol v0.0.2
+# Architecture — Synapta Protocol v0.0.3
 
 ## ภาพรวม
 
@@ -93,7 +93,8 @@ node ที่ได้รับ `invoke` จะรันเองหรือ�
 - background task ทุกตัวอยู่ใน `TaskTracker` และฟัง `CancellationToken` ตัวเดียว → `shutdown()` รอทุกตัวจบภายใน `shutdown_grace_ms`
 - job token เป็นลูกของ shutdown token → ปิด node = ยกเลิกทุก job
 - ทุก network operation มี timeout (connect, handshake, request, heartbeat, idle)
-- reconnect ถอยแบบ exponential และหยุดหลัง `max_reconnect_attempts` จนกว่าจะเห็น advert ใหม่ของ peer นั้น
+- reconnect ถอยแบบ exponential · address ที่รู้จาก advert หยุดหลัง `max_reconnect_attempts` จนกว่าจะเห็น advert ใหม่
+  · seed ใน config ไม่ยอมแพ้: หลังครบโควตาลองช้าลงทุก `seed_retry_ms` (ค่าเริ่ม 30 s) ตลอดที่ node ยังรัน
 - รอเหตุการณ์ด้วย `watch`/`Notify` ไม่มี busy-wait (ที่ poll มีแห่งเดียวคือ `synapta-sandbox` ที่รอสถานะของ process อื่นผ่าน HTTP)
 
 ## จุดต่อขยาย

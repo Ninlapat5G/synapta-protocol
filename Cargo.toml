@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/synapta-core", "crates/synapta-gateway", "crates/synapta-node"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 license = "UNLICENSED"
 publish = false

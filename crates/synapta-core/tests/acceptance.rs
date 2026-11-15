@@ -10,7 +10,7 @@ use serde_json::json;
 use synapta_core::discovery::handshake::{self, HandshakeParams};
 use synapta_core::identity::{parse_verifying_key, TrustStore};
 use synapta_core::protocol::message::{Event, Frame, JobState, Request, RequestFrame};
-use synapta_core::protocol::PROTOCOL_VERSION;
+use synapta_core::protocol::{WireRange, SOFTWARE_VERSION};
 use synapta_core::registry::PeerState;
 use synapta_core::routing::{Rejection, RoutingMode};
 use synapta_core::transport::framing::{read_frame, write_frame};
@@ -42,7 +42,8 @@ async fn test_01_peer_discovery_and_handshake() {
         let names: Vec<&str> = advert.capabilities.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, caps, "{peer} capabilities");
         assert!(advert.resources.mocked, "resources are declared as mocked");
-        assert_eq!(advert.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(advert.software_version, SOFTWARE_VERSION);
+        assert_eq!(advert.wire, WireRange::SUPPORTED);
     }
 
     // A connection that skips the handshake gets NotReady and nothing runs.

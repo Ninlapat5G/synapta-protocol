@@ -1,6 +1,6 @@
-# Test Report — Synapta Protocol v0.0.2
+# Test Report — Synapta Protocol v0.0.3
 
-วันที่รัน: 2026-11-14 (ปรับ routing + เทสต์โหลด และ secure channel v0.0.2: 2026-11-15) · Windows 11 · rustc/cargo 1.99.1 · ทุกการทดสอบอยู่บน 127.0.0.1 และโฟลเดอร์ชั่วคราวเท่านั้น
+วันที่รัน: 2026-11-14 (ปรับ routing + เทสต์โหลด, secure channel v0.0.2 และบั๊ก + version v0.0.3: 2026-11-15) · Windows 11 · rustc/cargo 1.99.1 · ทุกการทดสอบอยู่บน 127.0.0.1 และโฟลเดอร์ชั่วคราวเท่านั้น
 
 ## คำสั่ง
 
@@ -15,19 +15,22 @@ cargo clippy --workspace --all-targets -- -D warnings ; cargo fmt --all --check
 
 | ชุด | จำนวน | ผล |
 |---|---|---|
-| unit (`synapta-core`) | 67 | ผ่านทั้งหมด |
+| unit (`synapta-core`) | 77 | ผ่านทั้งหมด |
 | acceptance in-process (`synapta-core/tests/acceptance.rs`) | 12 | ผ่านทั้งหมด |
+| ความเข้ากันได้กับ node รุ่นใหม่กว่า (`synapta-core/tests/compatibility.rs`) | 2 | ผ่านทั้งหมด |
+| link ที่ต้องอยู่รอด / กลับมาเอง (`synapta-core/tests/link_resilience.rs`) | 2 | ผ่านทั้งหมด |
 | การกระจายงานภายใต้โหลด (`synapta-core/tests/load_balancing.rs`) | 4 | ผ่านทั้งหมด |
 | secure channel บนสายจริง (`synapta-core/tests/secure_channel.rs`) | 2 | ผ่านทั้งหมด |
 | unit (`synapta-gateway`) | 3 | ผ่านทั้งหมด |
 | UTCP + local API (`synapta-gateway/tests/utcp.rs`) | 3 + 1 | 3 ผ่าน · SDK ทางการ: `ignored` ใน `--workspace`, **ผ่าน** เมื่อรันด้วย `SYNAPTA_UTCP_PYTHON` |
 | E2E 3 process (`synapta-node/tests/e2e.rs`) | 1 | ผ่าน |
-| **รวม `cargo test --workspace`** | **92 ผ่าน, 0 ตก, 1 ignored** | |
-| รวมเมื่อเปิด SDK ทางการ | 93 ผ่าน, 0 ตก | |
+| **รวม `cargo test --workspace`** | **106 ผ่าน, 0 ตก, 1 ignored** | |
+| รวมเมื่อเปิด SDK ทางการ | 107 ผ่าน, 0 ตก | |
 
 ความเสถียร: `acceptance` รันติดกัน 15 รอบ และทั้ง workspace (รวม E2E) 5 รอบ — ผ่านทุกรอบ ไม่มี flaky
 หลังปรับ routing (v2): ทั้ง workspace 4 รอบติด · E2E 8 รอบติด · `load_balancing` 12 รอบติด — ผ่านทุกรอบ
 หลังเพิ่ม secure channel (v0.0.2): ทั้ง workspace 4 รอบติด (รวมเทสต์โหลด) · SDK ทางการผ่าน — ผ่านทุกรอบ
+v0.0.3 (บั๊ก + version): ทั้ง workspace 4 รอบติด (106 ผ่านทุกรอบ) · SDK ทางการผ่าน · `synapta-sandbox` build release ผ่านทุกข้อ
 lint: `clippy -D warnings` สะอาด · `cargo fmt --check` สะอาด
 
 ## ผล TEST-01 … TEST-10
@@ -122,9 +125,29 @@ node-a เป็นผู้เรียก · node-b และ node-c รับ
 | ส่งซ้ำ / สลับลำดับ / record จาก session อื่น | unit `replayed_and_reordered_records_are_rejected`, `record_from_another_session_is_rejected` | ถูกปฏิเสธทั้งหมด |
 | คนกลางที่ไม่มี key | unit `relaying_man_in_the_middle_is_refused` — คนกลางเปิด Noise แยกกับสองฝั่งและส่งลายเซ็นต่อ | dialer ปฏิเสธ (`failed to prove its identity`) · acceptor ไม่ยอมรับ session |
 | frame ใหญ่เกิน | unit `size_limit_holds_on_both_sides`, `frames_round_trip_including_ones_spanning_many_records` (200 KB) | ฝั่งส่งและรับปฏิเสธ · frame หลาย record ถอดกลับถูก |
-| node v0.0.1 | unit `v001_hello_gets_version_mismatch` | ได้ `version_mismatch` |
+| node v0.0.1 / v0.0.2 | unit `hellos_from_older_releases_get_version_mismatch` | ได้ `version_mismatch` (ข้อความ "older than v0.0.3") |
 
 เทสต์เดิมที่ยืนยันตัวตน (trust list, key ผิด, node ผิดที่ address) ยังผ่านบน handshake ใหม่ทั้งหมด
+
+## บั๊กที่แก้ และความเข้ากันได้ (v0.0.3)
+
+บั๊ก 1–3 ยืนยันด้วยเทสต์บนโค้ดเดิมก่อนแก้ทุกข้อ (ผลอยู่ในคอลัมน์ "ก่อนแก้")
+
+| # | ปัญหา | ก่อนแก้ | เทสต์ | หลังแก้ |
+|---|---|---|---|---|
+| 1 | ping ใช้ช่อง request ร่วมกับงาน — ช่องเต็ม (32) ping ได้ `busy` แล้ว link ถูกตัด | 32 งานช้าพร้อมกัน: สำเร็จ 0, `connection_lost` 32 | `a_link_with_every_request_slot_busy_keeps_its_heartbeat` | สำเร็จครบ link ยัง READY |
+| 2 | dialer ยอมแพ้หลังครบโควตา แม้เป็น seed — node ที่หายไปนานกลับมาแล้วไม่ถูกต่อ | B หาย 20 s แล้วกลับที่เดิม: A ไม่ต่อ และลืม B | `a_seed_that_was_away_for_a_long_time_is_found_again` | A ต่อกลับเอง (ยืนยันว่าเทสต์ล้มเมื่อปิดการลองใหม่ของ seed) |
+| 3 | ผลของ invoke ค้างในตารางเดียวกับ job — invoke ถี่ ๆ ดันผล job ที่ยังไม่มีคนมารับออก | เพดาน 5 + invoke 10 ครั้ง: ผล job หาย (`job_not_found`) | unit `sync_calls_never_push_out_an_unfetched_async_result`, `a_timed_out_sync_call_leaves_nothing_behind` | ผล job อยู่ครบ invoke ไม่ทิ้งรายการ |
+| 4 | ก่อนยืนยันตัวตนรับ frame ได้ถึง 1 MiB (อ่านจากโค้ด) | — | unit `oversized_hello_is_refused_before_it_is_read`, `the_session_gets_the_full_frame_limit` | handshake จำกัด 4 KiB · หลังยืนยันตัวตนได้เพดานเต็ม |
+
+| ความเข้ากันได้ | เทสต์ | ผล |
+|---|---|---|
+| ต่อรอง version | unit `wire_ranges_meet_at_the_highest_shared_version` | เลือกตัวสูงสุดที่ร่วมกัน · ไม่มีร่วม → ไม่ต่อ |
+| คนกลางแก้ช่วง version ใน hello | unit `an_edited_version_offer_is_refused` | ลายเซ็นไม่ผ่าน handshake ล้ม |
+| acceptor เลือก version ผิด | unit `acceptor_choosing_another_version_is_refused` | dialer ปฏิเสธ |
+| ข้อความชนิดใหม่จาก node รุ่นใหม่กว่า | unit `messages_from_a_newer_version_parse_as_unknown`, `unknown_fields_are_ignored` · สายจริง `messages_from_a_newer_release_do_not_close_the_link` | frame/notify ที่ไม่รู้จักถูกข้าม · request ที่ไม่รู้จักได้ `unsupported_request` ไม่ได้รันอะไร · link ใช้ต่อได้ |
+| method ที่รู้จักแต่ params ผิด | unit `known_method_with_bad_params_is_still_an_error` | ยังเป็น error เหมือนเดิม |
+| node ที่ไม่มี version ร่วม | สายจริง `a_node_on_another_wire_version_is_known_but_not_dialled` | เก็บ advert ไว้ใน registry แต่ไม่ dial |
 
 ## สิ่งที่พบและแก้ระหว่างทดสอบ
 
@@ -138,6 +161,10 @@ node-a เป็นผู้เรียก · node-b และ node-c รับ
 6. **heartbeat 600 ms ทำ link หลุดตอนเครื่องแน่น** — ค่า 600 ms เป็นค่าของเทสต์ (จับ peer ตายให้เร็ว) พอรันโหลดหนัก 3 ชุดพร้อมกัน
    node ตอบ ping ไม่ทัน link ถูกปิด งานที่ค้างบน link นั้นได้ `ConnectionLost` (ถูกต้องตาม at-most-once ไม่ได้รันซ้ำ)
    เทสต์โหลดเปลี่ยนไปใช้ค่าเดียวกับ production (3 s) แล้วไม่หลุดอีก · **ข้อควรรู้:** เครื่องที่ CPU แน่นมากควรตั้ง `heartbeat_timeout_ms` เผื่อไว้
+   v0.0.3 ตรวจซ้ำหลังแก้บั๊ก 1: เทสต์โหลดด้วย 600 ms รันเดี่ยวผ่าน แต่รัน 3 ชุดพร้อมกันยังหลุด → สาเหตุคือ CPU เต็มจริง ไม่ใช่บั๊ก 1
+7. **บั๊ก 4 ข้อของ v0.0.3** — ดูตารางด้านบน
+8. **`#[serde(other)]` ใช้กับ enum แบบ `{method, params}` ไม่ได้** (พบจากเทสต์ระหว่างทำ v0.0.3) — method ที่ไม่รู้จักแต่มี params
+   ถูกอ่านเป็น error แทน `Unknown` · แก้: `Request` / `Notification` ตรวจชื่อ method กับรายการที่รู้จักก่อน (มีเทสต์ว่ารายการครบ)
 
 ## สิ่งที่ยังไม่ได้ทดสอบ
 

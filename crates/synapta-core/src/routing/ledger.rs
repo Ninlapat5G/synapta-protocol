@@ -182,7 +182,7 @@ impl Drop for Ticket<'_> {
 mod tests {
     use super::*;
     use crate::protocol::message::{Availability, NodeAdvert, ResourceState};
-    use crate::protocol::{NodeType, PROTOCOL_VERSION};
+    use crate::protocol::{NodeType, WireRange, SOFTWARE_VERSION};
     use crate::registry::PeerState;
 
     fn b() -> NodeId {
@@ -194,7 +194,8 @@ mod tests {
             node_id: b(),
             name: "b".into(),
             node_type: NodeType::Server,
-            protocol_version: PROTOCOL_VERSION.into(),
+            software_version: SOFTWARE_VERSION.into(),
+            wire: WireRange::SUPPORTED,
             address: "127.0.0.1:1".into(),
             incarnation: 1,
             seq,

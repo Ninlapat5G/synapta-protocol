@@ -5,6 +5,9 @@
 //! size limit → idle timeout → per-connection in-flight request limit. A malformed or oversized
 //! frame gets an error frame and the connection is closed; a frame that fails to decrypt closes
 //! it without a reply. The node itself carries on.
+//!
+//! Messages this build does not know (from a newer peer) do not close anything: an unknown
+//! request is answered with `unsupported_request`, other unknown frames are ignored.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,7 +24,7 @@ use crate::error::{ErrorBody, ErrorCode};
 use crate::execution::EventSink;
 use crate::node::service;
 use crate::node::state::NodeState;
-use crate::protocol::message::{Frame, Notification, ResponseFrame};
+use crate::protocol::message::{Frame, Notification, Request, ResponseFrame};
 use crate::transport::framing::FrameError;
 use crate::transport::secure::Sealer;
 use crate::transport::{BoxedConnection, Listener};
@@ -116,6 +119,13 @@ async fn serve_connection(state: Arc<NodeState>, mut conn: BoxedConnection, remo
             Ok(Ok(frame)) => frame,
         };
         match frame {
+            // Answered right here, outside the in-flight limit. A ping used to take a slot like
+            // any request: with the slots full it came back `busy`, the dialer read that as a
+            // dead peer and closed the link, failing every request still running on it.
+            Frame::Request(request) if request.request == Request::Ping => {
+                let pong = ResponseFrame::from_result(request.id, Ok(service::pong()));
+                let _ = tx.try_send(Frame::Response(pong));
+            }
             Frame::Request(request) => {
                 let Ok(permit) = inflight.clone().try_acquire_owned() else {
                     let busy = ErrorBody::new(ErrorCode::Busy, "too many requests in flight on this connection");
@@ -136,6 +146,9 @@ async fn serve_connection(state: Arc<NodeState>, mut conn: BoxedConnection, remo
                 if let Err(e) = flooding::accept_advert(&state, signed, Some(&peer)) {
                     tracing::warn!(peer = %peer, error = %e, "advert rejected");
                 }
+            }
+            Frame::Notify(Notification::Unknown) | Frame::Unknown => {
+                tracing::debug!(peer = %peer, "ignored a message of unknown type");
             }
             other => {
                 tracing::warn!(peer = %peer, ?other, "unexpected frame on inbound session, closing");

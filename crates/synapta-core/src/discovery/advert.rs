@@ -7,7 +7,7 @@
 use crate::error::{ErrorBody, ErrorCode};
 use crate::identity::{NodeIdentity, TrustStore};
 use crate::protocol::message::{NodeAdvert, SignedAdvert};
-use crate::protocol::{is_compatible_version, NodeId};
+use crate::protocol::NodeId;
 use crate::transport::AddressPolicy;
 
 const DOMAIN: &str = "synapta-advert\n";
@@ -40,15 +40,8 @@ pub fn verify(signed: &SignedAdvert, trust: &TrustStore, policy: AddressPolicy) 
     policy
         .check(&address)
         .map_err(|e| ErrorBody::new(ErrorCode::BadRequest, format!("advert for {}: {e}", advert.node_id)))?;
-    if !is_compatible_version(&advert.protocol_version) {
-        return Err(ErrorBody::new(
-            ErrorCode::VersionMismatch,
-            format!(
-                "advert for {} uses protocol {}",
-                advert.node_id, advert.protocol_version
-            ),
-        ));
-    }
+    // The advert's wire versions are not checked here: a node we cannot talk to is still worth
+    // knowing about (status shows why it is unusable). `flooding` just does not dial it.
     Ok(advert)
 }
 
@@ -68,14 +61,15 @@ mod tests {
     use super::*;
     use crate::identity::{generate_keypair, parse_signing_key, parse_verifying_key};
     use crate::protocol::message::{Availability, ResourceState};
-    use crate::protocol::{NodeType, PROTOCOL_VERSION};
+    use crate::protocol::{NodeType, WireRange, SOFTWARE_VERSION};
 
     fn advert(id: &str, address: &str) -> NodeAdvert {
         NodeAdvert {
             node_id: NodeId::new(id).unwrap(),
             name: id.into(),
             node_type: NodeType::Server,
-            protocol_version: PROTOCOL_VERSION.into(),
+            software_version: SOFTWARE_VERSION.into(),
+            wire: WireRange::SUPPORTED,
             address: address.into(),
             incarnation: 1,
             seq: 1,

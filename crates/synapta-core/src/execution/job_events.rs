@@ -39,6 +39,7 @@ impl JobEventLog {
         let job_id = match &event {
             Event::JobProgress(p) => p.job_id.clone(),
             Event::JobFinished { job_id, .. } => job_id.clone(),
+            Event::Unknown => return,
         };
         let key = (node.clone(), job_id);
         let mut inner = self.inner.lock().unwrap();

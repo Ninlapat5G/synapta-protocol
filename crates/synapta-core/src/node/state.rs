@@ -1,7 +1,7 @@
 //! Shared state of one running node. Each concern keeps its own lock, and no lock is held
 //! across an `.await` (snapshots are copied out first).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -16,7 +16,7 @@ use crate::execution::jobs::JobManager;
 use crate::execution::{Executor, ExecutorRegistry};
 use crate::identity::{NodeIdentity, TrustStore};
 use crate::protocol::message::{CapabilityAdvert, NodeAdvert, ResourceState, SignedAdvert};
-use crate::protocol::{NodeId, PROTOCOL_VERSION};
+use crate::protocol::{NodeId, WireRange, SOFTWARE_VERSION};
 use crate::registry::Registry;
 use crate::routing::ledger::DispatchLedger;
 use crate::routing::RoutingDecision;
@@ -43,8 +43,9 @@ pub(crate) struct NodeState {
     pub job_events: JobEventLog,
     pub routing_log: Mutex<VecDeque<RoutingDecision>>,
     pub dispatch_ledger: DispatchLedger,
-    /// Addresses with a running dialer task (at most one per address).
-    pub dialers: Mutex<HashSet<SocketAddr>>,
+    /// Addresses with a running dialer task (at most one per address), each with the signal
+    /// that cuts its current wait short.
+    pub dialers: Mutex<HashMap<SocketAddr, Arc<Notify>>>,
     pub shutdown: CancellationToken,
     pub tasks: TaskTracker,
 }
@@ -80,7 +81,7 @@ impl NodeState {
             registry: RwLock::new(Registry::default()),
             registry_version: watch::channel(0).0,
             own_advert: Mutex::new(OwnAdvert { seq: 0, signed: None }),
-            dialers: Mutex::new(HashSet::new()),
+            dialers: Mutex::new(HashMap::new()),
             config: parts.config,
             identity: parts.identity,
             trust: parts.trust,
@@ -117,7 +118,8 @@ impl NodeState {
             node_id: self.node_id().clone(),
             name: self.config.node.name.clone(),
             node_type: self.config.node.node_type,
-            protocol_version: PROTOCOL_VERSION.into(),
+            software_version: SOFTWARE_VERSION.into(),
+            wire: WireRange::SUPPORTED,
             address: self.listen_addr.to_string(),
             incarnation: self.incarnation,
             seq,

@@ -4,11 +4,16 @@
 //! Each [`Frame`] is UTF-8 JSON. `Hello` and `HelloAck` (and an `Error` refusing them) travel as
 //! a 4-byte big-endian length plus the JSON (`transport::framing`); every later frame is
 //! encrypted (`transport::secure`).
+//!
+//! Growing without a new wire version: unknown JSON fields are ignored everywhere, and the
+//! `Unknown` variants below catch frame types, request methods, notifications, events and
+//! error codes this build has not heard of — a newer peer may send them and the link stays up.
+//! Anything else (a new value in another enum, a changed field) needs a new wire version.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use super::{NodeId, NodeType};
+use super::{NodeId, NodeType, WireRange};
 use crate::error::ErrorBody;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,15 +36,20 @@ pub enum Frame {
     Notify(Notification),
     /// Either side, sent right before closing because of a protocol violation.
     Error(ErrorBody),
+    /// A frame type this build does not know. Ignored after the handshake.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Dialer → acceptor, in the clear.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
-    pub protocol_version: String,
+    /// Wire versions the dialer speaks. Defaults to none, so a hello from v0.0.1 / v0.0.2 (which
+    /// sent a version string instead) still parses and is refused with `version_mismatch`.
+    #[serde(default)]
+    pub wire: WireRange,
     pub node_id: NodeId,
-    /// First Noise NN handshake message (the dialer's ephemeral key), hex. Defaults to empty so a
-    /// v0.0.1 hello still parses and is refused with `version_mismatch` rather than as malformed.
+    /// First Noise NN handshake message (the dialer's ephemeral key), hex.
     #[serde(default)]
     pub noise: String,
 }
@@ -47,9 +57,14 @@ pub struct Hello {
 /// Acceptor → dialer, in the clear.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HelloAck {
-    pub protocol_version: String,
+    /// Wire versions the acceptor speaks. Default: see [`Hello::wire`].
+    #[serde(default)]
+    pub wire: WireRange,
+    /// The version this connection uses: the highest one in both ranges.
+    #[serde(default)]
+    pub wire_version: u32,
     pub node_id: NodeId,
-    /// Second Noise NN message (the acceptor's ephemeral key), hex. Default: see [`Hello::noise`].
+    /// Second Noise NN message (the acceptor's ephemeral key), hex.
     #[serde(default)]
     pub noise: String,
 }
@@ -74,8 +89,10 @@ pub struct RequestFrame {
     pub request: Request,
 }
 
+/// `{"method": ..., "params": ...}`. Serde is reached through [`with_unknown_methods`]: the
+/// derived code alone cannot turn an unknown method that carries params into `Unknown`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "method", content = "params")]
+#[serde(remote = "Self", tag = "method", content = "params")]
 pub enum Request {
     #[serde(rename = "ping")]
     Ping,
@@ -95,7 +112,26 @@ pub enum Request {
     JobResult { job_id: String, wait_ms: u64 },
     #[serde(rename = "job.cancel")]
     JobCancel { job_id: String },
+    /// A method this build does not know. Answered with `unsupported_request`; never sent.
+    #[serde(skip)]
+    Unknown,
 }
+
+impl Request {
+    /// Every method above. A method missing here would be read as `Unknown`, so
+    /// `every_method_is_listed_as_known` checks the two stay in step.
+    const METHODS: &'static [&'static str] = &[
+        "ping",
+        "adverts.sync",
+        "invoke",
+        "job.submit",
+        "job.status",
+        "job.result",
+        "job.cancel",
+    ];
+}
+
+with_unknown_methods!(Request);
 
 /// Exactly one of `result` / `error` is present.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,14 +164,55 @@ impl ResponseFrame {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     JobProgress(JobProgress),
-    JobFinished { job_id: String, state: JobState },
+    JobFinished {
+        job_id: String,
+        state: JobState,
+    },
+    /// An event this build does not know. Ignored.
+    #[serde(other)]
+    Unknown,
 }
 
+/// Same shape and the same unknown-method handling as [`Request`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "method", content = "params", rename_all = "snake_case")]
+#[serde(remote = "Self", tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Notification {
     Advert(SignedAdvert),
+    /// A notification this build does not know. Ignored; never sent.
+    #[serde(skip)]
+    Unknown,
 }
+
+impl Notification {
+    const METHODS: &'static [&'static str] = &["advert"];
+}
+
+with_unknown_methods!(Notification);
+
+/// Serde for a `{"method", "params"}` enum (derived with `remote = "Self"`) whose `METHODS`
+/// lists the methods it knows: any other method becomes `Unknown`, whatever its params. A
+/// known method with bad params is still an error, as before.
+macro_rules! with_unknown_methods {
+    ($enum:ident) => {
+        impl Serialize for $enum {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                $enum::serialize(self, serializer)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $enum {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = Value::deserialize(deserializer)?;
+                let method = value.get("method").and_then(Value::as_str);
+                if method.is_some_and(|m| !$enum::METHODS.contains(&m)) {
+                    return Ok($enum::Unknown);
+                }
+                $enum::deserialize(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+use with_unknown_methods;
 
 // ---------------------------------------------------------------------------------------------
 // Link-state adverts (the OSPF-inspired part). Signing / verification: discovery::advert.
@@ -147,7 +224,10 @@ pub struct NodeAdvert {
     pub node_id: NodeId,
     pub name: String,
     pub node_type: NodeType,
-    pub protocol_version: String,
+    /// Release the node runs. For people reading status output; compatibility is `wire`.
+    pub software_version: String,
+    /// Wire versions the node speaks. Nodes with no version in common are not dialled.
+    pub wire: WireRange,
     /// Address other nodes dial to reach this node.
     pub address: String,
     /// Changes on every process start (start time in ms). Together with `seq` this orders
@@ -309,8 +389,91 @@ mod tests {
         }
     }
 
+    /// What a newer peer might send. None of it may fail to parse (that would close the link),
+    /// and none of it may turn into something this node acts on.
     #[test]
-    fn unknown_frame_type_is_rejected() {
-        assert!(serde_json::from_str::<Frame>(r#"{"type":"exec_shell","cmd":"rm -rf /"}"#).is_err());
+    fn messages_from_a_newer_version_parse_as_unknown() {
+        let parse = |text: &str| serde_json::from_str::<Frame>(text).unwrap();
+        assert_eq!(parse(r#"{"type":"exec_shell","cmd":"rm -rf /"}"#), Frame::Unknown);
+        assert_eq!(
+            parse(r#"{"type":"request","id":9,"request":{"method":"files.read","params":{"path":"x"}}}"#),
+            Frame::Request(RequestFrame {
+                id: 9,
+                request: Request::Unknown
+            })
+        );
+        assert_eq!(
+            parse(r#"{"type":"notify","method":"topology_hint","params":{"hops":2}}"#),
+            Frame::Notify(Notification::Unknown)
+        );
+        assert_eq!(
+            parse(r#"{"type":"event","event":"job_log","job_id":"j1","line":"hi"}"#),
+            Frame::Event(Event::Unknown)
+        );
+        let Frame::Response(response) =
+            parse(r#"{"type":"response","id":1,"error":{"code":"quota_exceeded","message":"m"}}"#)
+        else {
+            panic!("not a response")
+        };
+        assert_eq!(response.error.unwrap().code, crate::error::ErrorCode::Unknown);
+    }
+
+    /// A sample of every known request and notification: each must come back as itself, which
+    /// fails if its method is missing from `METHODS` (it would come back as `Unknown`).
+    #[test]
+    fn every_method_is_listed_as_known() {
+        let advert = SignedAdvert {
+            payload: "{}".into(),
+            signature: "00".into(),
+        };
+        let requests = [
+            Request::Ping,
+            Request::SyncAdverts {
+                adverts: vec![advert.clone()],
+            },
+            Request::Invoke {
+                capability: "math.add".into(),
+                input: json!({}),
+            },
+            Request::JobSubmit {
+                capability: "math.add".into(),
+                input: json!({}),
+            },
+            Request::JobStatus { job_id: "j".into() },
+            Request::JobResult {
+                job_id: "j".into(),
+                wait_ms: 1,
+            },
+            Request::JobCancel { job_id: "j".into() },
+        ];
+        assert_eq!(requests.len(), Request::METHODS.len(), "a sample per method");
+        for request in requests {
+            let text = serde_json::to_string(&request).unwrap();
+            assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request, "{text}");
+        }
+        let notification = Notification::Advert(advert);
+        let text = serde_json::to_string(&notification).unwrap();
+        assert_eq!(serde_json::from_str::<Notification>(&text).unwrap(), notification);
+    }
+
+    /// A known method with bad params is malformed, not unknown.
+    #[test]
+    fn known_method_with_bad_params_is_still_an_error() {
+        assert!(serde_json::from_str::<Request>(r#"{"method":"invoke","params":{"capability":7}}"#).is_err());
+        assert!(serde_json::from_str::<Request>(r#"{"params":{}}"#).is_err());
+    }
+
+    /// Extra fields on a message this build knows are ignored, not an error.
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let frame: Frame =
+            serde_json::from_str(r#"{"type":"request","id":1,"priority":5,"request":{"method":"ping"}}"#).unwrap();
+        assert_eq!(
+            frame,
+            Frame::Request(RequestFrame {
+                id: 1,
+                request: Request::Ping
+            })
+        );
     }
 }

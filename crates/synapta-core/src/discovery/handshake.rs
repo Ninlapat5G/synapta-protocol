@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! dialer                                      acceptor
-//!   Hello{version, dialer_id, noise: e}    -->                       in the clear
-//!                                          <--  HelloAck{version, acceptor_id, noise: e, ee}
+//!   Hello{wire, dialer_id, noise: e}       -->                       in the clear
+//!                                          <--  HelloAck{wire, wire_version, acceptor_id, noise: e, ee}
 //!   ─── Noise NN done: both hold the session keys and the handshake hash h ───
 //!                                          <--  HelloProof{sig_a}    encrypted from here on
 //!   HelloFinish{sig_d}                     -->
@@ -18,11 +18,16 @@
 //! side — ends up with two different h values and cannot pass either side's signature on.
 //!
 //! The signed transcript also names the role (a signature from one direction cannot be replayed
-//! in the other) and both node ids (the ids travel in the clear, outside h). A node id that is
-//! not in the trust store is refused no matter what it claims.
+//! in the other) and everything else that travels in the clear, outside h: both node ids, the
+//! wire versions each side offered and the one chosen. Someone who edits an offer in transit —
+//! to push both sides onto an older version — makes the two transcripts differ, and the
+//! signatures fail. A node id that is not in the trust store is refused no matter what it claims.
 //!
-//! In the clear: protocol version, both node ids and the ephemeral public keys. Everything after
+//! In the clear: wire versions, both node ids and the ephemeral public keys. Everything after
 //! `HelloAck`, including errors, is encrypted by `transport::secure`.
+//!
+//! This exchange is the one part of the protocol every future version must keep as it is:
+//! it is how two nodes find out which version to speak.
 
 use snow::HandshakeState;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -30,13 +35,17 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::{ErrorBody, ErrorCode};
 use crate::identity::{from_hex, to_hex, NodeIdentity, TrustStore};
 use crate::protocol::message::{Frame, Hello, HelloAck, HelloFinish, HelloProof};
-use crate::protocol::{is_compatible_version, NodeId, PROTOCOL_VERSION};
+use crate::protocol::{NodeId, WireRange};
 use crate::transport::framing::{read_frame, write_frame, FrameError};
 use crate::transport::secure::{self, Opener, Sealer};
 
 const NOISE_PARAMS: &str = "Noise_NN_25519_ChaChaPoly_SHA256";
 /// Each NN handshake message is one 32-byte key plus an empty payload (and a tag on the second).
 const NOISE_MESSAGE_MAX: usize = 128;
+/// Size limit for every frame until the peer has proven who it is (real ones are under 1 KiB).
+/// The node-wide `max_frame_bytes` applies only afterwards: before this limit existed, anyone
+/// who could open a connection could make the node buffer a full-size frame per connection.
+const HANDSHAKE_FRAME_MAX: usize = 4096;
 
 pub struct HandshakeParams<'a> {
     pub identity: &'a NodeIdentity,
@@ -64,7 +73,7 @@ pub async fn dial<S: AsyncRead + AsyncWrite + Unpin>(
     let mut buf = [0u8; NOISE_MESSAGE_MAX];
     let len = noise.write_message(&[], &mut buf).map_err(noise_error)?;
     wire.send(Frame::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION.into(),
+        wire: WireRange::SUPPORTED,
         node_id: own_id.clone(),
         noise: to_hex(&buf[..len]),
     }))
@@ -79,9 +88,12 @@ pub async fn dial<S: AsyncRead + AsyncWrite + Unpin>(
                 .await
         }
     };
-    if !is_compatible_version(&ack.protocol_version) {
-        let msg = format!("peer speaks {}, this node {PROTOCOL_VERSION}", ack.protocol_version);
-        return wire.fail(ErrorCode::VersionMismatch, msg).await;
+    let Some(wire_version) = WireRange::SUPPORTED.highest_common(ack.wire) else {
+        return wire.fail(ErrorCode::VersionMismatch, no_common_version(ack.wire)).await;
+    };
+    if ack.wire_version != wire_version {
+        let msg = format!("peer chose wire version {}, expected {wire_version}", ack.wire_version);
+        return wire.fail(ErrorCode::HandshakeFailed, msg).await;
     }
     if &ack.node_id == own_id {
         return wire.fail(ErrorCode::HandshakeFailed, "connected to self".into()).await;
@@ -113,18 +125,22 @@ pub async fn dial<S: AsyncRead + AsyncWrite + Unpin>(
                 .await
         }
     };
-    let acceptor_transcript = transcript("acceptor", own_id, &ack.node_id, &hash);
+    let transcript = Transcript {
+        wire_version,
+        dialer: (own_id, WireRange::SUPPORTED),
+        acceptor: (&ack.node_id, ack.wire),
+        handshake_hash: &hash,
+    };
     if !params
         .trust
-        .verify(&ack.node_id, &acceptor_transcript, &proof.signature)
+        .verify(&ack.node_id, &transcript.signed_by("acceptor"), &proof.signature)
     {
         let msg = format!("{} failed to prove its identity", ack.node_id);
         return wire.fail(ErrorCode::HandshakeFailed, msg).await;
     }
 
-    let dialer_transcript = transcript("dialer", own_id, &ack.node_id, &hash);
     wire.send(Frame::HelloFinish(HelloFinish {
-        signature: params.identity.sign(&dialer_transcript),
+        signature: params.identity.sign(&transcript.signed_by("dialer")),
     }))
     .await?;
 
@@ -153,10 +169,11 @@ pub async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
             return wire.fail(ErrorCode::NotReady, msg).await;
         }
     };
-    if !is_compatible_version(&hello.protocol_version) {
-        let msg = format!("peer speaks {}, this node {PROTOCOL_VERSION}", hello.protocol_version);
-        return wire.fail(ErrorCode::VersionMismatch, msg).await;
-    }
+    let Some(wire_version) = WireRange::SUPPORTED.highest_common(hello.wire) else {
+        return wire
+            .fail(ErrorCode::VersionMismatch, no_common_version(hello.wire))
+            .await;
+    };
     if &hello.node_id == own_id {
         return wire.fail(ErrorCode::HandshakeFailed, "connected to self".into()).await;
     }
@@ -173,7 +190,8 @@ pub async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
     let mut buf = [0u8; NOISE_MESSAGE_MAX];
     let len = noise.write_message(&[], &mut buf).map_err(noise_error)?;
     wire.send(Frame::HelloAck(HelloAck {
-        protocol_version: PROTOCOL_VERSION.into(),
+        wire: WireRange::SUPPORTED,
+        wire_version,
         node_id: own_id.clone(),
         noise: to_hex(&buf[..len]),
     }))
@@ -181,9 +199,14 @@ pub async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
     let hash = noise.get_handshake_hash().to_vec();
     wire.encrypt(noise)?;
 
-    let acceptor_transcript = transcript("acceptor", &hello.node_id, own_id, &hash);
+    let transcript = Transcript {
+        wire_version,
+        dialer: (&hello.node_id, hello.wire),
+        acceptor: (own_id, WireRange::SUPPORTED),
+        handshake_hash: &hash,
+    };
     wire.send(Frame::HelloProof(HelloProof {
-        signature: params.identity.sign(&acceptor_transcript),
+        signature: params.identity.sign(&transcript.signed_by("acceptor")),
     }))
     .await?;
 
@@ -195,10 +218,9 @@ pub async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
                 .await
         }
     };
-    let dialer_transcript = transcript("dialer", &hello.node_id, own_id, &hash);
     if !params
         .trust
-        .verify(&hello.node_id, &dialer_transcript, &finish.signature)
+        .verify(&hello.node_id, &transcript.signed_by("dialer"), &finish.signature)
     {
         let msg = format!("{} failed to prove its identity", hello.node_id);
         return wire.fail(ErrorCode::HandshakeFailed, msg).await;
@@ -229,15 +251,41 @@ fn noise_error(e: snow::Error) -> ErrorBody {
     ErrorBody::new(ErrorCode::HandshakeFailed, format!("key exchange: {e}"))
 }
 
-fn transcript(role: &str, dialer: &NodeId, acceptor: &NodeId, handshake_hash: &[u8]) -> Vec<u8> {
-    let hash = to_hex(handshake_hash);
-    format!("synapta-handshake/{PROTOCOL_VERSION}/{role}\n{dialer}\n{acceptor}\n{hash}").into_bytes()
+fn no_common_version(peer: WireRange) -> String {
+    format!("peer speaks {peer}, this node {}", WireRange::SUPPORTED)
+}
+
+/// What both sides sign: everything the handshake agreed on, as each side saw it.
+struct Transcript<'a> {
+    wire_version: u32,
+    dialer: (&'a NodeId, WireRange),
+    acceptor: (&'a NodeId, WireRange),
+    handshake_hash: &'a [u8],
+}
+
+impl Transcript<'_> {
+    fn signed_by(&self, role: &str) -> Vec<u8> {
+        let (dialer, dialer_wire) = self.dialer;
+        let (acceptor, acceptor_wire) = self.acceptor;
+        format!(
+            "synapta-handshake\n{role}\nwire {}\ndialer {dialer} {} {}\nacceptor {acceptor} {} {}\n{}",
+            self.wire_version,
+            dialer_wire.min,
+            dialer_wire.max,
+            acceptor_wire.min,
+            acceptor_wire.max,
+            to_hex(self.handshake_hash)
+        )
+        .into_bytes()
+    }
 }
 
 /// The connection during the handshake: frames in the clear until [`Wire::encrypt`], then
-/// sealed. Errors go out the same way as everything else at that point.
+/// sealed. Errors go out the same way as everything else at that point. Frames are held to
+/// `HANDSHAKE_FRAME_MAX` throughout; the finished session gets the node's real limit.
 struct Wire<'a, S> {
     stream: &'a mut S,
+    /// Limit for the session once the handshake has succeeded.
     max_frame_bytes: usize,
     keys: Option<(Sealer, Opener)>,
 }
@@ -253,19 +301,21 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> Wire<'a, S> {
 
     fn encrypt(&mut self, noise: HandshakeState) -> Result<(), ErrorBody> {
         let transport = noise.into_stateless_transport_mode().map_err(noise_error)?;
-        self.keys = Some(secure::channel(transport, self.max_frame_bytes));
+        self.keys = Some(secure::channel(transport, HANDSHAKE_FRAME_MAX));
         Ok(())
     }
 
     fn into_session(self, peer: NodeId) -> Result<Session, ErrorBody> {
-        let (sealer, opener) = self.keys.expect("handshake finishes encrypted");
+        let (mut sealer, mut opener) = self.keys.expect("handshake finishes encrypted");
+        sealer.set_max_frame_bytes(self.max_frame_bytes);
+        opener.set_max_frame_bytes(self.max_frame_bytes);
         Ok(Session { peer, sealer, opener })
     }
 
     async fn write(&mut self, frame: &Frame) -> Result<(), FrameError> {
         match &mut self.keys {
             Some((sealer, _)) => sealer.write_frame(self.stream, frame).await,
-            None => write_frame(self.stream, frame, self.max_frame_bytes).await,
+            None => write_frame(self.stream, frame, HANDSHAKE_FRAME_MAX).await,
         }
     }
 
@@ -278,7 +328,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> Wire<'a, S> {
     async fn receive(&mut self) -> Result<Frame, ErrorBody> {
         let read = match &mut self.keys {
             Some((_, opener)) => opener.read_frame(self.stream).await,
-            None => read_frame(self.stream, self.max_frame_bytes).await,
+            None => read_frame(self.stream, HANDSHAKE_FRAME_MAX).await,
         };
         match read {
             Ok(frame) => Ok(frame),
@@ -321,6 +371,7 @@ fn frame_kind(frame: &Frame) -> &'static str {
         Frame::Event(_) => "event",
         Frame::Notify(_) => "notify",
         Frame::Error(_) => "error",
+        Frame::Unknown => "an unknown frame type",
     }
 }
 
@@ -450,24 +501,146 @@ mod tests {
         assert!(matches!(read_frame(&mut d, 4096).await.unwrap(), Frame::Error(e) if e.code == ErrorCode::NotReady));
     }
 
-    /// A v0.0.1 node's hello (nonce instead of a Noise message) is told the versions differ.
+    /// Hellos as v0.0.1 (a nonce) and v0.0.2 (a Noise message) sent them, with a version string
+    /// and no wire range: both are told the versions differ, not that the frame is malformed.
     #[tokio::test]
-    async fn v001_hello_gets_version_mismatch() {
+    async fn hellos_from_older_releases_get_version_mismatch() {
         let (a, b) = (peer("node-a"), peer("node-b"));
         let trust = trusting(&[&a]);
+        let old_hellos = [
+            format!(
+                r#"{{"type":"hello","protocol_version":"0.0.1","node_id":"node-a","nonce":"{}"}}"#,
+                "ab".repeat(32)
+            ),
+            format!(
+                r#"{{"type":"hello","protocol_version":"0.0.2","node_id":"node-a","noise":"{}"}}"#,
+                "ab".repeat(32)
+            ),
+        ];
+        for old_hello in old_hellos {
+            let (mut d, mut s) = tokio::io::duplex(8192);
+            d.write_all(&(old_hello.len() as u32).to_be_bytes()).await.unwrap();
+            d.write_all(old_hello.as_bytes()).await.unwrap();
+            let bp = params(&b, &trust);
+            let refused = accept(&mut s, &bp).await.err().unwrap();
+            assert_eq!(refused.code, ErrorCode::VersionMismatch, "{old_hello}");
+            let Frame::Error(told) = read_frame(&mut d, 4096).await.unwrap() else {
+                panic!("no error frame for {old_hello}")
+            };
+            assert_eq!(told.code, ErrorCode::VersionMismatch);
+            assert!(told.message.contains("older than v0.0.3"), "{}", told.message);
+        }
+    }
+
+    /// Someone in the middle edits the dialer's offer, then relays every byte untouched. The edit
+    /// changes nothing either side computes (only one version is on offer today), yet it must
+    /// fail: the day a range spans two versions, the same edit could force the older one.
+    #[tokio::test]
+    async fn an_edited_version_offer_is_refused() {
+        let (a, b) = (peer("node-a"), peer("node-b"));
+        let (at, bt) = (trusting(&[&b]), trusting(&[&a]));
+        let (ap, bp) = (params(&a, &at), params(&b, &bt));
+        let (mut to_a, mut a_end) = tokio::io::duplex(8192);
+        let (mut to_b, mut b_end) = tokio::io::duplex(8192);
+        let mitm = async {
+            let Frame::Hello(mut hello) = read_frame(&mut to_a, 4096).await.unwrap() else {
+                panic!()
+            };
+            hello.wire.max += 1;
+            write_frame(&mut to_b, &Frame::Hello(hello), 4096).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut to_a, &mut to_b).await;
+        };
+        let (dialed, accepted) = tokio::select! {
+            outcome = async { tokio::join!(dial(&mut a_end, &ap, None), accept(&mut b_end, &bp)) } => outcome,
+            _ = mitm => panic!("relay ended first"),
+        };
+        let refused = dialed.err().unwrap();
+        assert_eq!(refused.code, ErrorCode::HandshakeFailed);
+        assert!(refused.message.contains("failed to prove"), "{}", refused.message);
+        assert!(accepted.is_err());
+    }
+
+    /// The acceptor names the version for the connection; naming any other than the highest
+    /// both offered is refused.
+    #[tokio::test]
+    async fn acceptor_choosing_another_version_is_refused() {
+        let (a, b) = (peer("node-a"), peer("node-b"));
+        let at = trusting(&[&b]);
+        let ap = params(&a, &at);
         let (mut d, mut s) = tokio::io::duplex(8192);
-        let old_hello = format!(
-            r#"{{"type":"hello","protocol_version":"0.0.1","node_id":"node-a","nonce":"{}"}}"#,
-            "ab".repeat(32)
-        );
-        d.write_all(&(old_hello.len() as u32).to_be_bytes()).await.unwrap();
-        d.write_all(old_hello.as_bytes()).await.unwrap();
-        let bp = params(&b, &trust);
-        let refused = accept(&mut s, &bp).await.err().unwrap();
-        assert_eq!(refused.code, ErrorCode::VersionMismatch);
+        let fake_acceptor = async {
+            let Frame::Hello(hello) = read_frame(&mut s, 4096).await.unwrap() else {
+                panic!()
+            };
+            let mut noise = noise_builder().build_responder().unwrap();
+            read_noise(&mut noise, &hello.noise).unwrap();
+            let mut buf = [0u8; NOISE_MESSAGE_MAX];
+            let len = noise.write_message(&[], &mut buf).unwrap();
+            let ack = HelloAck {
+                wire: WireRange { min: 2, max: 3 },
+                wire_version: 2,
+                node_id: b.identity.node_id.clone(),
+                noise: to_hex(&buf[..len]),
+            };
+            write_frame(&mut s, &Frame::HelloAck(ack), 4096).await.unwrap();
+        };
+        let (dialed, ()) = tokio::join!(dial(&mut d, &ap, None), fake_acceptor);
+        let refused = dialed.err().unwrap();
+        assert_eq!(refused.code, ErrorCode::HandshakeFailed);
+        assert!(refused.message.contains("chose wire version 2"), "{}", refused.message);
+    }
+
+    /// Before the peer is authenticated, the node-wide frame limit (1 MiB here) does not apply.
+    #[tokio::test]
+    async fn oversized_hello_is_refused_before_it_is_read() {
+        let b = peer("node-b");
+        let trust = trusting(&[]);
+        let (mut d, mut s) = tokio::io::duplex(8192);
+        d.write_all(&(HANDSHAKE_FRAME_MAX as u32 + 1).to_be_bytes())
+            .await
+            .unwrap();
+        let bp = HandshakeParams {
+            identity: &b.identity,
+            trust: &trust,
+            max_frame_bytes: 1 << 20,
+        };
+        assert_eq!(accept(&mut s, &bp).await.err().unwrap().code, ErrorCode::FrameTooLarge);
         assert!(
-            matches!(read_frame(&mut d, 4096).await.unwrap(), Frame::Error(e) if e.code == ErrorCode::VersionMismatch)
+            matches!(read_frame(&mut d, 4096).await.unwrap(), Frame::Error(e) if e.code == ErrorCode::FrameTooLarge)
         );
+    }
+
+    /// The handshake limit is lifted once the peer is authenticated.
+    #[tokio::test]
+    async fn the_session_gets_the_full_frame_limit() {
+        let (a, b) = (peer("node-a"), peer("node-b"));
+        let (at, bt) = (trusting(&[&b]), trusting(&[&a]));
+        let ap = HandshakeParams {
+            identity: &a.identity,
+            trust: &at,
+            max_frame_bytes: 1 << 20,
+        };
+        let bp = HandshakeParams {
+            identity: &b.identity,
+            trust: &bt,
+            max_frame_bytes: 1 << 20,
+        };
+        let (mut d, mut s) = tokio::io::duplex(1 << 16);
+        let (dialed, accepted) = tokio::join!(dial(&mut d, &ap, None), accept(&mut s, &bp));
+        let (mut dialed, mut accepted) = (dialed.unwrap(), accepted.unwrap());
+        let big = Frame::Request(RequestFrame {
+            id: 1,
+            request: Request::Invoke {
+                capability: "system.echo".into(),
+                input: serde_json::json!({ "text": "x".repeat(100_000) }),
+            },
+        });
+        let (sent, received) = tokio::join!(
+            dialed.sealer.write_frame(&mut d, &big),
+            accepted.opener.read_frame(&mut s)
+        );
+        sent.unwrap();
+        assert_eq!(received.unwrap(), big);
     }
 
     /// Someone between a and b who holds no trusted key but relays everything, running its own
