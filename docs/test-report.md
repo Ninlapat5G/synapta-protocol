@@ -1,6 +1,6 @@
-# Test Report — Synapta Protocol v0.0.1
+# Test Report — Synapta Protocol v0.0.2
 
-วันที่รัน: 2026-11-14 (ปรับ routing + เทสต์โหลด 2026-11-15) · Windows 11 · rustc/cargo 1.99.1 · ทุกการทดสอบอยู่บน 127.0.0.1 และโฟลเดอร์ชั่วคราวเท่านั้น
+วันที่รัน: 2026-11-14 (ปรับ routing + เทสต์โหลด และ secure channel v0.0.2: 2026-11-15) · Windows 11 · rustc/cargo 1.99.1 · ทุกการทดสอบอยู่บน 127.0.0.1 และโฟลเดอร์ชั่วคราวเท่านั้น
 
 ## คำสั่ง
 
@@ -15,17 +15,19 @@ cargo clippy --workspace --all-targets -- -D warnings ; cargo fmt --all --check
 
 | ชุด | จำนวน | ผล |
 |---|---|---|
-| unit (`synapta-core`) | 59 | ผ่านทั้งหมด |
+| unit (`synapta-core`) | 67 | ผ่านทั้งหมด |
 | acceptance in-process (`synapta-core/tests/acceptance.rs`) | 12 | ผ่านทั้งหมด |
 | การกระจายงานภายใต้โหลด (`synapta-core/tests/load_balancing.rs`) | 4 | ผ่านทั้งหมด |
+| secure channel บนสายจริง (`synapta-core/tests/secure_channel.rs`) | 2 | ผ่านทั้งหมด |
 | unit (`synapta-gateway`) | 3 | ผ่านทั้งหมด |
 | UTCP + local API (`synapta-gateway/tests/utcp.rs`) | 3 + 1 | 3 ผ่าน · SDK ทางการ: `ignored` ใน `--workspace`, **ผ่าน** เมื่อรันด้วย `SYNAPTA_UTCP_PYTHON` |
 | E2E 3 process (`synapta-node/tests/e2e.rs`) | 1 | ผ่าน |
-| **รวม `cargo test --workspace`** | **82 ผ่าน, 0 ตก, 1 ignored** | |
-| รวมเมื่อเปิด SDK ทางการ | 83 ผ่าน, 0 ตก | |
+| **รวม `cargo test --workspace`** | **92 ผ่าน, 0 ตก, 1 ignored** | |
+| รวมเมื่อเปิด SDK ทางการ | 93 ผ่าน, 0 ตก | |
 
 ความเสถียร: `acceptance` รันติดกัน 15 รอบ และทั้ง workspace (รวม E2E) 5 รอบ — ผ่านทุกรอบ ไม่มี flaky
 หลังปรับ routing (v2): ทั้ง workspace 4 รอบติด · E2E 8 รอบติด · `load_balancing` 12 รอบติด — ผ่านทุกรอบ
+หลังเพิ่ม secure channel (v0.0.2): ทั้ง workspace 4 รอบติด (รวมเทสต์โหลด) · SDK ทางการผ่าน — ผ่านทุกรอบ
 lint: `clippy -D warnings` สะอาด · `cargo fmt --check` สะอาด
 
 ## ผล TEST-01 … TEST-10
@@ -110,6 +112,19 @@ node-a เป็นผู้เรียก · node-b และ node-c รับ
 
 **ทดสอบเครื่องแน่น** (รัน 3 ชุดพร้อมกัน): การแบ่งงานยังถูก ไม่มีเครื่องเกินเพดาน อัตราใช้งานลดเหลือ 71–84% เพราะ CPU เครื่องเต็มเอง
 ชุดเทสต์โหลดจึงตั้งเกณฑ์ไว้ที่ ≥ 75% (v1 ได้ 70–75% บนเครื่องว่าง)
+
+## Secure channel (v0.0.2)
+
+| สิ่งที่ต้องกัน | เทสต์ | ผล |
+|---|---|---|
+| อ่านข้อความบนสาย | `nothing_after_the_hello_is_readable_on_the_wire` — node จริงคุยผ่าน relay ที่บันทึกทุกไบต์ | เห็นแค่ `hello`/`hello_ack` กับ node id · ไม่เจอ input ของงาน, ชื่อ capability, `invoke`, `ping`, `advert`, ลายเซ็น |
+| แก้ข้อความ | unit `any_flipped_byte_is_rejected` (พลิกทีละไบต์ทุกตำแหน่ง) · สายจริง `a_corrupted_frame_closes_the_link_and_runs_nothing` | ทุกไบต์ถูกปฏิเสธ · บนสายจริง: ได้ `connection_lost`, node-b ไม่ได้รันอะไร, ต่อใหม่แล้วใช้ได้ต่อ |
+| ส่งซ้ำ / สลับลำดับ / record จาก session อื่น | unit `replayed_and_reordered_records_are_rejected`, `record_from_another_session_is_rejected` | ถูกปฏิเสธทั้งหมด |
+| คนกลางที่ไม่มี key | unit `relaying_man_in_the_middle_is_refused` — คนกลางเปิด Noise แยกกับสองฝั่งและส่งลายเซ็นต่อ | dialer ปฏิเสธ (`failed to prove its identity`) · acceptor ไม่ยอมรับ session |
+| frame ใหญ่เกิน | unit `size_limit_holds_on_both_sides`, `frames_round_trip_including_ones_spanning_many_records` (200 KB) | ฝั่งส่งและรับปฏิเสธ · frame หลาย record ถอดกลับถูก |
+| node v0.0.1 | unit `v001_hello_gets_version_mismatch` | ได้ `version_mismatch` |
+
+เทสต์เดิมที่ยืนยันตัวตน (trust list, key ผิด, node ผิดที่ address) ยังผ่านบน handshake ใหม่ทั้งหมด
 
 ## สิ่งที่พบและแก้ระหว่างทดสอบ
 

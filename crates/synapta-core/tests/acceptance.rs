@@ -10,6 +10,7 @@ use serde_json::json;
 use synapta_core::discovery::handshake::{self, HandshakeParams};
 use synapta_core::identity::{parse_verifying_key, TrustStore};
 use synapta_core::protocol::message::{Event, Frame, JobState, Request, RequestFrame};
+use synapta_core::protocol::PROTOCOL_VERSION;
 use synapta_core::registry::PeerState;
 use synapta_core::routing::{Rejection, RoutingMode};
 use synapta_core::transport::framing::{read_frame, write_frame};
@@ -41,7 +42,7 @@ async fn test_01_peer_discovery_and_handshake() {
         let names: Vec<&str> = advert.capabilities.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, caps, "{peer} capabilities");
         assert!(advert.resources.mocked, "resources are declared as mocked");
-        assert_eq!(advert.protocol_version, "0.0.1");
+        assert_eq!(advert.protocol_version, PROTOCOL_VERSION);
     }
 
     // A connection that skips the handshake gets NotReady and nothing runs.
@@ -284,8 +285,8 @@ async fn test_07b_silent_peer_detected_by_heartbeat_timeout() {
                 trust: &trust,
                 max_frame_bytes: 1 << 20,
             };
-            if handshake::accept(&mut stream, &params).await.is_ok() {
-                tokio::spawn(async move { while read_frame(&mut stream, 1 << 20).await.is_ok() {} });
+            if let Ok(mut session) = handshake::accept(&mut stream, &params).await {
+                tokio::spawn(async move { while session.opener.read_frame(&mut stream).await.is_ok() {} });
             }
         }
     });
@@ -421,9 +422,9 @@ async fn test_09_isolation_and_security() {
         trust: &trust,
         max_frame_bytes: 1 << 20,
     };
-    handshake::dial(&mut direct, &params, Some(&id("node-c")))
-        .await
-        .unwrap();
+    let Ok(mut session) = handshake::dial(&mut direct, &params, Some(&id("node-c"))).await else {
+        panic!("handshake with node-c failed");
+    };
     let bypass = Frame::Request(RequestFrame {
         id: 9,
         request: Request::Invoke {
@@ -431,8 +432,8 @@ async fn test_09_isolation_and_security() {
             input: json!({}),
         },
     });
-    write_frame(&mut direct, &bypass, 1 << 20).await.unwrap();
-    match read_frame(&mut direct, 1 << 20).await.unwrap() {
+    session.sealer.write_frame(&mut direct, &bypass).await.unwrap();
+    match session.opener.read_frame(&mut direct).await.unwrap() {
         Frame::Response(r) => assert_eq!(r.error.unwrap().code, ErrorCode::Unauthorized),
         other => panic!("unexpected {other:?}"),
     }
@@ -462,7 +463,7 @@ async fn test_09_isolation_and_security() {
         max_frame_bytes: 1 << 20,
     };
     assert_eq!(
-        handshake::dial(&mut stream, &params, None).await.unwrap_err().code,
+        handshake::dial(&mut stream, &params, None).await.err().unwrap().code,
         ErrorCode::UntrustedPeer
     );
 

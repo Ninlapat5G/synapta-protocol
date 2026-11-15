@@ -1,10 +1,11 @@
-# ข้อจำกัดที่รู้แล้ว และ Roadmap v0.0.2
+# ข้อจำกัดที่รู้แล้ว และ Roadmap
 
-## Known limitations (v0.0.1)
+## Known limitations (v0.0.2)
 
 ### ความปลอดภัย
-- **frame หลัง handshake ไม่เข้ารหัส/ไม่มี MAC** — ยืนยันตัวตนแค่ตอนเปิด connection ผู้ที่ดักกลาง TCP ได้จะอ่าน/แก้ข้อความได้
-  บน loopback ไม่มีผล บนเครือข่ายจริงต้องอยู่หลัง WireGuard (Tailscale) หรือรอข้อ v0.0.2
+- **node id เห็นในที่แจ้งตอน handshake** — คนดักสายรู้ว่า node ไหนคุยกับ node ไหน (ไม่รู้ว่าคุยอะไร)
+  ถ้าต้องซ่อน: ย้าย id เข้าไปในส่วนที่เข้ารหัส (แลกกับการรู้ช้าลงว่าอีกฝั่งไม่อยู่ใน trust list)
+- **ต่อกับ node v0.0.1 ไม่ได้** — ต้องอัปเดตทุก node พร้อมกัน (ได้ `version_mismatch` ชัดเจน ไม่ค้าง)
 - **heartbeat timeout ต่ำเกินบนเครื่อง CPU แน่น** ทำ link หลุดและงานที่ค้างบน link ได้ `ConnectionLost` — ค่าเริ่ม 3 s พอสำหรับเครื่องทั่วไป
   (เทสต์ใช้ 600 ms เพื่อจับ peer ตายเร็ว และพบว่าหลุดเมื่อรันโหลดหนักซ้อนกัน 3 ชุด)
 - **ไม่มีการเพิกถอน key** — เอา peer ออกจาก trust list ต้อง restart node
@@ -34,10 +35,9 @@
 - ทดสอบกับ Python SDK ทางการตัวเดียว (utcp 1.2.0 / utcp-http 1.1.15) · ใช้เฉพาะ protocol `http` ไม่มี streaming
 - เทสต์ SDK ทางการไม่อยู่ใน `cargo test --workspace` อัตโนมัติ (ต้องมี Python)
 
-## Roadmap v0.0.2 (เรียงตามสิ่งที่กันพังได้มากสุด)
+## Roadmap (เรียงตามสิ่งที่กันพังได้มากสุด)
 
-1. **Secure channel** — Noise (เช่น `XX` ด้วย static key เดิม) หรือ derive session key จาก handshake แล้ว MAC ทุก frame
-   → ปิดช่องดัก/แก้ข้อความ ก่อนออกจาก loopback
+1. ~~**Secure channel**~~ — **เสร็จใน v0.0.2:** Noise NN + ลายเซ็น Ed25519 บน handshake hash (`docs/protocol.md`)
 2. **Tailscale transport** — `AddressPolicy::Tailnet` (100.64.0.0/10 + `fd7a:115c:a1e0::/48`) + ตรวจว่า peer มาจาก tailnet จริง
    (`Transport` trait รองรับแล้ว ไม่ต้องแก้ routing)
 3. **ทรัพยากรจริง** — อ่าน cpu/memory จาก host (โหมด `mock` ยังคงไว้สำหรับเทสต์)

@@ -21,14 +21,14 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::flooding;
-use super::handshake::{self, HandshakeParams};
+use super::handshake::{self, HandshakeParams, Session};
 use crate::config::ms;
 use crate::error::{ErrorBody, ErrorCode};
 use crate::node::state::NodeState;
 use crate::protocol::message::{Frame, Notification, Request, RequestFrame, ResponseFrame, SignedAdvert};
 use crate::protocol::NodeId;
 use crate::registry::PeerState;
-use crate::transport::framing::{read_frame, write_frame};
+use crate::transport::secure::Sealer;
 use crate::transport::BoxedConnection;
 
 static NEXT_LINK_ID: AtomicU64 = AtomicU64::new(1);
@@ -201,10 +201,11 @@ async fn dial_loop(state: &Arc<NodeState>, addr: SocketAddr, mut known: Option<N
             attempt = connect(state, addr, known.as_ref()) => attempt,
         };
         match attempt {
-            Ok((conn, peer)) => {
+            Ok((conn, session)) => {
                 failures = 0;
+                let peer = session.peer.clone();
                 known = Some(peer.clone());
-                match run_link(state, conn, peer.clone()).await {
+                match run_link(state, conn, session).await {
                     LinkEnd::Shutdown | LinkEnd::Duplicate => return,
                     LinkEnd::Lost(reason) => tracing::warn!(peer = %peer, %reason, "link lost"),
                 }
@@ -239,7 +240,7 @@ async fn connect(
     state: &Arc<NodeState>,
     addr: SocketAddr,
     expected: Option<&NodeId>,
-) -> Result<(BoxedConnection, NodeId), ErrorBody> {
+) -> Result<(BoxedConnection, Session), ErrorBody> {
     let mut conn = state
         .transport
         .dial(addr)
@@ -250,18 +251,23 @@ async fn connect(
         trust: &state.trust,
         max_frame_bytes: state.config.limits.max_frame_bytes,
     };
-    let peer = tokio::time::timeout(
+    let session = tokio::time::timeout(
         ms(state.config.timeouts.handshake_ms),
         handshake::dial(&mut conn, &params, expected),
     )
     .await
     .map_err(|_| ErrorBody::new(ErrorCode::Timeout, format!("handshake with {addr} timed out")))??;
-    Ok((conn, peer))
+    Ok((conn, session))
 }
 
 /// Drives one authenticated link until it fails, the node shuts down, or it turns out to be a
 /// duplicate of an existing link.
-async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, peer: NodeId) -> LinkEnd {
+async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, session: Session) -> LinkEnd {
+    let Session {
+        peer,
+        sealer,
+        mut opener,
+    } = session;
     let (mut reader, writer) = tokio::io::split(conn);
     let (tx, rx) = mpsc::channel(OUTBOUND_QUEUE);
     let link = LinkHandle::new(peer.clone(), tx);
@@ -277,8 +283,7 @@ async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, peer: NodeId) -
     state.registry_changed();
     tracing::info!(peer = %peer, "peer READY");
 
-    let max_frame = state.config.limits.max_frame_bytes;
-    state.tasks.spawn(write_loop(writer, rx, link.clone(), max_frame));
+    state.tasks.spawn(write_loop(writer, sealer, rx, link.clone()));
     state.tasks.spawn(heartbeat_loop(state.clone(), link.clone()));
     state.tasks.spawn(sync_adverts(state.clone(), link.clone()));
 
@@ -286,7 +291,7 @@ async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, peer: NodeId) -
         let frame = tokio::select! {
             _ = state.shutdown.cancelled() => break LinkEnd::Shutdown,
             _ = link.inner.closed.cancelled() => break LinkEnd::Lost(link.close_reason()),
-            frame = read_frame(&mut reader, max_frame) => frame,
+            frame = opener.read_frame(&mut reader) => frame,
         };
         match frame {
             Ok(Frame::Response(response)) => link.complete(response),
@@ -313,9 +318,9 @@ async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, peer: NodeId) -
 
 async fn write_loop<W: AsyncWrite + Unpin>(
     mut writer: W,
+    mut sealer: Sealer,
     mut rx: mpsc::Receiver<Frame>,
     link: LinkHandle,
-    max_frame: usize,
 ) {
     loop {
         let frame = tokio::select! {
@@ -323,7 +328,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             frame = rx.recv() => frame,
         };
         let Some(frame) = frame else { return };
-        if let Err(e) = write_frame(&mut writer, &frame, max_frame).await {
+        if let Err(e) = sealer.write_frame(&mut writer, &frame).await {
             link.close(format!("write failed: {e}"));
             return;
         }

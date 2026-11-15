@@ -1,8 +1,12 @@
-# Protocol Message Specification — v0.0.1
+# Protocol Message Specification — v0.0.2
 
 ที่มาของจริง: `crates/synapta-core/src/protocol/message.rs` (แก้ไฟล์นั้นต้องแก้เอกสารนี้ด้วย)
 
 ## Framing
+
+มีสองชั้น เนื้อในเป็น JSON (UTF-8) ที่มี field `"type"` เหมือนกันทุก frame
+
+**1. ในที่แจ้ง** — ใช้แค่ `hello`, `hello_ack` และ `error` ที่ปฏิเสธสองตัวนี้ (`transport/framing.rs`)
 
 ```
 ┌──────────────┬──────────────────────────────┐
@@ -11,17 +15,31 @@
 └──────────────┴──────────────────────────────┘
 ```
 
-- `length` = 0 → malformed · `length` > `limits.max_frame_bytes` (ค่าเริ่ม 1 MiB) → `frame_too_large`
-  ตรวจก่อนจองหน่วยความจำ
-- frame ผิดรูป/ใหญ่เกิน: ฝั่งรับส่ง `Frame::Error` แล้วปิด connection — process ไม่ล้ม
-- ทุก frame มี field `"type"`
+**2. เข้ารหัส** — ทุก frame หลังจากนั้น (`transport/secure.rs`) frame หนึ่งเป็น record หนึ่งตัวขึ้นไป
+
+```
+┌──────────────┬─────────────────────────────────────────────────────┐
+│ length: u16  │ Noise ciphertext (ChaCha20-Poly1305, tag 16 ไบต์)     │
+│ big-endian   │   ถอดแล้ว = flag 1 ไบต์ (1 = record สุดท้าย, 0 = มีต่อ) │
+│              │             + JSON ส่วนหนึ่งของ frame                 │
+└──────────────┴─────────────────────────────────────────────────────┘
+```
+
+- record หนึ่งยาวได้ไม่เกิน 65 535 ไบต์ (เพดานของ Noise) frame ที่ยาวกว่านั้นแบ่งหลาย record
+- แต่ละทิศนับ record 0, 1, 2… และใช้เลขนั้นเป็น nonce → record ที่ถูกแก้ ส่งซ้ำ สลับลำดับ หาย หรือมาจาก session อื่น
+  ถอดไม่ผ่าน ฝั่งรับปิด connection ทันทีโดยไม่ตอบอะไร
+- ทั้งสองชั้น: `length` = 0 → malformed · ขนาด frame รวม > `limits.max_frame_bytes` (ค่าเริ่ม 1 MiB) → `frame_too_large`
+  ตรวจก่อนจองหน่วยความจำ (ชั้นเข้ารหัสตรวจทุก record ที่สะสม)
+- frame ผิดรูป/ใหญ่เกิน: ฝั่งรับส่ง `Frame::Error` (เข้ารหัสถ้าอยู่ในชั้น 2) แล้วปิด connection — process ไม่ล้ม
 
 ## ลำดับบน connection
 
 ```
 dialer                                    acceptor
-  hello        {protocol_version, node_id, nonce}          -->
-                                          <--  hello_ack {protocol_version, node_id, nonce, signature}
+  hello        {protocol_version, node_id, noise}           -->      ในที่แจ้ง
+                                          <--  hello_ack {protocol_version, node_id, noise}
+  ─────────── เข้ารหัสตั้งแต่ตรงนี้ ───────────
+                                          <--  hello_proof {signature}
   hello_finish {signature}                                  -->
                                           <--  welcome
   request  {id, request:{method, params}}                   -->
@@ -35,23 +53,30 @@ dialer                                    acceptor
 - request หลายตัวค้างพร้อมกันบน connection เดียวได้ จับคู่ด้วย `id` (ไม่เกิน `limits.max_inflight_requests_per_connection` → เกินได้ `busy`)
 - acceptor ปิด connection ที่เงียบเกิน `timeouts.idle_timeout_ms` (dialer ส่ง `ping` ทุก `heartbeat_interval_ms` อยู่แล้ว)
 
-## Handshake (ยืนยันตัวตนสองทาง)
+## Handshake (แลก key + ยืนยันตัวตนสองทาง)
 
-transcript ที่ถูกเซ็น (UTF-8):
+ที่มา: `discovery/handshake.rs`
+
+1. **แลก key** — Noise `Noise_NN_25519_ChaChaPoly_SHA256` (crate `snow`), prologue `synapta-protocol`
+   `hello.noise` / `hello_ack.noise` = ข้อความ Noise ข้อที่ 1 / 2 (hex) คือ X25519 public key ชั่วคราวของแต่ละฝั่ง
+   สร้างใหม่ทุก connection → ได้ session key และ handshake hash `h` (ครอบคลุม key ชั่วคราวทั้งสอง)
+2. **ยืนยันตัวตน** — แต่ละฝั่งเซ็น transcript ด้วย Ed25519 key ของ node (key เดิม trust list เดิม):
 
 ```
-synapta-handshake/0.0.1/<role>\n<dialer_id>\n<acceptor_id>\n<dialer_nonce>\n<acceptor_nonce>
+synapta-handshake/0.0.2/<role>\n<dialer_id>\n<acceptor_id>\n<hex(h)>
 ```
 
-- `hello_ack.signature` = acceptor เซ็น transcript role `acceptor`
-- `hello_finish.signature` = dialer เซ็น transcript role `dialer`
-- nonce = 32 ไบต์สุ่ม (hex 64 ตัว) ใหม่ทุก connection
+- `hello_proof.signature` = acceptor เซ็น role `acceptor` · `hello_finish.signature` = dialer เซ็น role `dialer`
 - ตรวจ: version ตรงกันพอดี · node id อยู่ใน trust list · ลายเซ็นผ่านด้วย key ของ id นั้น (`verify_strict`) ·
   ไม่ใช่ตัวเอง · ถ้า dialer รู้ว่าที่ address นั้นควรเป็นใคร (จาก advert) ต้องตรง
-- role ในข้อความกันการเอาลายเซ็นทิศหนึ่งไปใช้อีกทิศ · nonce กัน replay ข้าม connection
+- **ทำไมกันคนกลางได้:** คนกลางที่อยากอ่านข้อความต้องเปิด Noise session แยกกับแต่ละฝั่ง → สอง session ได้ `h` ต่างกัน
+  ลายเซ็นที่ฝั่งจริงเซ็นจึงใช้กับอีก session ไม่ได้ (มีเทสต์ `relaying_man_in_the_middle_is_refused`)
+- role กันเอาลายเซ็นทิศหนึ่งไปใช้อีกทิศ · id อยู่ใน transcript เพราะส่งในที่แจ้ง ไม่ได้อยู่ใน `h`
+- key ชั่วคราวทิ้งเมื่อ connection ปิด → ข้อความที่ดักบันทึกไว้ยังอ่านไม่ได้ แม้ key ของ node รั่วทีหลัง (forward secrecy)
 
-> ข้อจำกัด: handshake ยืนยันตัวตนตอนเปิด connection แต่ frame หลังจากนั้น **ไม่ได้เข้ารหัสหรือ MAC**
-> บน loopback รับได้ · บนเครือข่ายจริงต้องพึ่ง WireGuard (Tailscale) หรือเพิ่ม secure channel ใน v0.0.2
+**ที่ยังเห็นในที่แจ้ง:** protocol version, node id ทั้งสองฝั่ง, public key ชั่วคราว — นอกนั้นเข้ารหัสหมด รวมถึง error
+
+**กับ node v0.0.1:** ต่อกันไม่ได้ — hello แบบเก่ายังอ่านออก (`noise` ว่างได้) และได้ `version_mismatch` ไม่ใช่ malformed
 
 ## Request methods
 
@@ -91,7 +116,7 @@ best effort: คิวเต็มจะทิ้ง event แต่สถาน
 ```json
 {
   "node_id": "node-b", "name": "Node B (server)", "node_type": "server",
-  "protocol_version": "0.0.1", "address": "127.0.0.1:47322",
+  "protocol_version": "0.0.2", "address": "127.0.0.1:47322",
   "incarnation": 1794632449365, "seq": 7,
   "capabilities": [{"name": "math.add", "description": "…", "input_schema": {…}, "output_schema": {…}, "allow": ["*"]}],
   "resources": {"cpu_percent": 20, "memory_available_mb": 16384, "active_jobs": 0,

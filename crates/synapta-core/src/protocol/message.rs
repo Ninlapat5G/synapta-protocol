@@ -1,8 +1,9 @@
 //! Every message that crosses a Synapta connection. `docs/protocol.md` documents this file;
 //! change both together.
 //!
-//! On the wire each [`Frame`] is a 4-byte big-endian length followed by that many bytes of
-//! UTF-8 JSON (see `transport::framing`).
+//! Each [`Frame`] is UTF-8 JSON. `Hello` and `HelloAck` (and an `Error` refusing them) travel as
+//! a 4-byte big-endian length plus the JSON (`transport::framing`); every later frame is
+//! encrypted (`transport::secure`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +17,7 @@ pub enum Frame {
     // --- handshake (dialer ⇄ acceptor), see discovery::handshake ---
     Hello(Hello),
     HelloAck(HelloAck),
+    HelloProof(HelloProof),
     HelloFinish(HelloFinish),
     Welcome,
     // --- after the handshake ---
@@ -31,23 +33,35 @@ pub enum Frame {
     Error(ErrorBody),
 }
 
+/// Dialer → acceptor, in the clear.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
     pub protocol_version: String,
     pub node_id: NodeId,
-    /// 32 random bytes, hex.
-    pub nonce: String,
+    /// First Noise NN handshake message (the dialer's ephemeral key), hex. Defaults to empty so a
+    /// v0.0.1 hello still parses and is refused with `version_mismatch` rather than as malformed.
+    #[serde(default)]
+    pub noise: String,
 }
 
+/// Acceptor → dialer, in the clear.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HelloAck {
     pub protocol_version: String,
     pub node_id: NodeId,
-    pub nonce: String,
+    /// Second Noise NN message (the acceptor's ephemeral key), hex. Default: see [`Hello::noise`].
+    #[serde(default)]
+    pub noise: String,
+}
+
+/// Acceptor → dialer, encrypted: proof the acceptor holds its node key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HelloProof {
     /// Acceptor's signature over the handshake transcript, hex.
     pub signature: String,
 }
 
+/// Dialer → acceptor, encrypted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HelloFinish {
     /// Dialer's signature over the handshake transcript, hex.

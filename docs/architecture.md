@@ -1,4 +1,4 @@
-# Architecture — Synapta Protocol v0.0.1
+# Architecture — Synapta Protocol v0.0.2
 
 ## ภาพรวม
 
@@ -13,9 +13,9 @@
                  │   discovery: link (ขาออก) · server (ขาเข้า) │          │
                  │              handshake · flooding (advert)  │          │
                  │   execution: Executor · JobManager ◀───────┘ (local)  │
-                 │   transport: Transport trait · framing · TCP          │
+                 │   transport: Transport trait · framing · secure · TCP │
                  └───────────────────────────────────────────────────────┘
-                          ▲  TCP 127.0.0.1, length-prefixed JSON  ▲
+                          ▲  TCP 127.0.0.1, Noise-encrypted JSON  ▲
                           └──────── node อื่น (เหมือนกันทุกตัว) ───┘
 ```
 
@@ -37,9 +37,9 @@ transport, discovery, routing, execution อยู่เป็น module ใน 
 | module | ทำอะไร |
 |---|---|
 | `protocol` | NodeId, version, **ทุกข้อความบนสาย** (`message.rs` = ที่เดียวของ schema) |
-| `transport` | trait `Transport`/`Listener`, `AddressPolicy`, framing, TCP |
+| `transport` | trait `Transport`/`Listener`, `AddressPolicy`, framing (ในที่แจ้ง), `secure` (frame เข้ารหัส), TCP |
 | `identity` | key Ed25519, ลายเซ็น, trust store |
-| `discovery` | `handshake` · `link` (ต่อออก + heartbeat + reconnect) · `server` (รับเข้า) · `flooding` (advert) · `advert` (เซ็น/ตรวจ) |
+| `discovery` | `handshake` (Noise NN + ลายเซ็น Ed25519) · `link` (ต่อออก + heartbeat + reconnect) · `server` (รับเข้า) · `flooding` (advert) · `advert` (เซ็น/ตรวจ) |
 | `registry` | มุมมองของ node นี้ต่อ peer อื่น: state ของ link + advert ล่าสุด |
 | `routing` | `decide()` (policy ล้วน ไม่มี I/O) · `dispatch` (ส่งงานตามผล + บันทึก) |
 | `execution` | trait `Executor`, executor mock, `JobManager`, log ของ job event |

@@ -1,4 +1,4 @@
-//! Synapta Protocol v0.0.1 — peer-to-peer node discovery, capability routing and remote
+//! Synapta Protocol v0.0.2 — peer-to-peer node discovery, capability routing and remote
 //! execution. See `docs/architecture.md` for how the modules fit together.
 //!
 //! | module        | job                                                         |

@@ -5,7 +5,7 @@
 Protocol ให้ node หลายเครื่องค้นพบกัน ประกาศความสามารถ เลือกเครื่องที่จะทำงาน และส่งงาน / เรียก tool ข้ามเครื่องได้โดยตรง
 ไม่มี server กลาง เขียนด้วย Rust + Tokio
 
-> สถานะ: **v0.0.1 — Proof of Concept** รันได้และทดสอบได้จริงบนเครื่องเดียว (loopback) ยังไม่ใช่ production
+> สถานะ: **v0.0.2 — Proof of Concept** รันได้และทดสอบได้จริงบนเครื่องเดียว (loopback) ยังไม่ใช่ production
 > ข้อจำกัดทั้งหมดอยู่ที่ [`docs/roadmap.md`](docs/roadmap.md)
 
 ## แนวคิด
@@ -83,12 +83,13 @@ docs/                เอกสาร (ดูด้านล่าง)
 - [`docs/utcp-integration.md`](docs/utcp-integration.md) — UTCP adapter และผลทดสอบกับ SDK ทางการ
 - [`docs/spec-review.md`](docs/spec-review.md) — ช่องโหว่ที่พบใน spec ต้นทาง และวิธีปิด
 - [`docs/test-report.md`](docs/test-report.md) — ผลทดสอบพร้อมหลักฐาน
-- [`docs/roadmap.md`](docs/roadmap.md) — ข้อจำกัดที่รู้แล้ว และแผน v0.0.2
+- [`docs/roadmap.md`](docs/roadmap.md) — ข้อจำกัดที่รู้แล้ว และแผนถัดไป
 
-## ความปลอดภัย (v0.0.1)
+## ความปลอดภัย (v0.0.2)
 
 - listen และ dial ได้เฉพาะ loopback — `0.0.0.0` ถูกปฏิเสธตั้งแต่ตรวจ config
 - ทุกการเชื่อมต่อต้องผ่าน handshake แบบลายเซ็น Ed25519 สองทาง กับ key ที่อยู่ใน trust list เท่านั้น
+- ทุก frame หลัง handshake เข้ารหัสและกันแก้ไข/ส่งซ้ำ (Noise NN, ChaCha20-Poly1305) key ใหม่ทุก connection
 - เครื่องปลายทางเป็นคนตัดสินสิทธิ์ (`allow` ต่อ capability) — ไม่เชื่อการตรวจของฝั่งผู้เรียก
 - ไม่มีโค้ดส่วนไหนใน core ที่รันคำสั่งบนเครื่องได้ (มีเทสต์กันไว้) executor ทั้งหมดเป็น mock ที่ไม่แตะ host
 - private key และ API token เขียนแบบเจ้าของอ่านได้คนเดียว (Unix 0600)

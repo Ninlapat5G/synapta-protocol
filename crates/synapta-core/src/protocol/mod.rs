@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Version string exchanged in the handshake. v0.0.x makes no compatibility promise,
 /// so peers must match exactly (see `is_compatible_version`).
-pub const PROTOCOL_VERSION: &str = "0.0.1";
+pub const PROTOCOL_VERSION: &str = "0.0.2";
 
 pub fn is_compatible_version(version: &str) -> bool {
     version == PROTOCOL_VERSION

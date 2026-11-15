@@ -6,6 +6,7 @@
 //! without touching routing or discovery.
 
 pub mod framing;
+pub mod secure;
 pub mod tcp;
 
 use std::io;

@@ -1,9 +1,10 @@
 //! Inbound side: accept connections, authenticate them, then serve the peer's requests.
 //!
 //! Defences, in order: connection-count limit → handshake within `handshake_ms` (nothing else is
-//! accepted before it) → per-frame size limit → idle timeout → per-connection in-flight request
-//! limit. A malformed or oversized frame gets an error frame and the connection is closed; the
-//! node itself carries on.
+//! accepted before it) → every later frame must decrypt under this session's keys → per-frame
+//! size limit → idle timeout → per-connection in-flight request limit. A malformed or oversized
+//! frame gets an error frame and the connection is closed; a frame that fails to decrypt closes
+//! it without a reply. The node itself carries on.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,14 +15,15 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::flooding;
-use super::handshake::{self, HandshakeParams};
+use super::handshake::{self, HandshakeParams, Session};
 use crate::config::ms;
 use crate::error::{ErrorBody, ErrorCode};
 use crate::execution::EventSink;
 use crate::node::service;
 use crate::node::state::NodeState;
 use crate::protocol::message::{Frame, Notification, ResponseFrame};
-use crate::transport::framing::{read_frame, write_frame, FrameError};
+use crate::transport::framing::FrameError;
+use crate::transport::secure::Sealer;
 use crate::transport::{BoxedConnection, Listener};
 
 const OUTBOUND_QUEUE: usize = 256;
@@ -65,8 +67,8 @@ async fn serve_connection(state: Arc<NodeState>, mut conn: BoxedConnection, remo
         trust: &state.trust,
         max_frame_bytes: limits.max_frame_bytes,
     };
-    let peer = match tokio::time::timeout(ms(timeouts.handshake_ms), handshake::accept(&mut conn, &params)).await {
-        Ok(Ok(peer)) => peer,
+    let session = match tokio::time::timeout(ms(timeouts.handshake_ms), handshake::accept(&mut conn, &params)).await {
+        Ok(Ok(session)) => session,
         Ok(Err(e)) => {
             tracing::warn!(%remote, code = ?e.code, error = %e.message, "inbound handshake refused");
             return;
@@ -76,20 +78,23 @@ async fn serve_connection(state: Arc<NodeState>, mut conn: BoxedConnection, remo
             return;
         }
     };
+    let Session {
+        peer,
+        sealer,
+        mut opener,
+    } = session;
     tracing::info!(peer = %peer, %remote, "inbound session authenticated");
 
     let (mut reader, writer) = tokio::io::split(conn);
     let (tx, rx) = mpsc::channel(OUTBOUND_QUEUE);
     let closed = state.shutdown.child_token();
-    state
-        .tasks
-        .spawn(write_loop(writer, rx, closed.clone(), limits.max_frame_bytes));
+    state.tasks.spawn(write_loop(writer, sealer, rx, closed.clone()));
     let inflight = Arc::new(Semaphore::new(limits.max_inflight_requests_per_connection));
 
     loop {
         let frame = tokio::select! {
             _ = closed.cancelled() => break,
-            frame = tokio::time::timeout(ms(timeouts.idle_timeout_ms), read_frame(&mut reader, limits.max_frame_bytes)) => frame,
+            frame = tokio::time::timeout(ms(timeouts.idle_timeout_ms), opener.read_frame(&mut reader)) => frame,
         };
         let frame = match frame {
             Err(_) => {
@@ -154,9 +159,9 @@ fn event_sink(tx: mpsc::Sender<Frame>) -> EventSink {
 
 async fn write_loop<W: AsyncWrite + Unpin>(
     mut writer: W,
+    mut sealer: Sealer,
     mut rx: mpsc::Receiver<Frame>,
     closed: CancellationToken,
-    max_frame: usize,
 ) {
     loop {
         let frame = tokio::select! {
@@ -165,7 +170,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                 // Write what is already queued (e.g. the error frame saying why), then stop.
                 let _ = tokio::time::timeout(FLUSH_ON_CLOSE, async {
                     while let Ok(frame) = rx.try_recv() {
-                        if write_frame(&mut writer, &frame, max_frame).await.is_err() {
+                        if sealer.write_frame(&mut writer, &frame).await.is_err() {
                             break;
                         }
                     }
@@ -175,7 +180,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             }
         };
         let Some(frame) = frame else { return };
-        if write_frame(&mut writer, &frame, max_frame).await.is_err() {
+        if sealer.write_frame(&mut writer, &frame).await.is_err() {
             closed.cancel();
             return;
         }

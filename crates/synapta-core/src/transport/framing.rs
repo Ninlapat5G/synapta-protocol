@@ -1,5 +1,8 @@
 //! Length-prefixed JSON framing: `u32` big-endian byte length, then the JSON bytes.
 //!
+//! Used as is only for the first two handshake messages; after that every frame goes through
+//! [`super::secure`], which encrypts the same JSON bytes ([`encode`] / [`decode`]).
+//!
 //! The length is checked against the limit *before* allocating, so a peer announcing a 4 GB
 //! frame costs us four bytes of reading, not 4 GB of memory.
 
@@ -17,6 +20,9 @@ pub enum FrameError {
     TooLarge { size: usize, limit: usize },
     #[error("malformed frame: {0}")]
     Malformed(String),
+    /// An encrypted record failed authentication: tampered, replayed, reordered or forged.
+    #[error("frame failed authentication")]
+    Unauthenticated,
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -27,7 +33,8 @@ impl FrameError {
         match self {
             FrameError::TooLarge { .. } => Some(ErrorBody::new(ErrorCode::FrameTooLarge, self.to_string())),
             FrameError::Malformed(_) => Some(ErrorBody::new(ErrorCode::MalformedFrame, self.to_string())),
-            FrameError::Closed | FrameError::Io(_) => None,
+            // Nothing is sent back: the channel itself can no longer be trusted.
+            FrameError::Closed | FrameError::Io(_) | FrameError::Unauthenticated => None,
         }
     }
 }
@@ -48,7 +55,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R, max_bytes: usize) 
     }
     let mut body = vec![0u8; size];
     reader.read_exact(&mut body).await?;
-    serde_json::from_slice(&body).map_err(|e| FrameError::Malformed(e.to_string()))
+    decode(&body)
 }
 
 pub async fn write_frame<W: AsyncWrite + Unpin>(
@@ -56,6 +63,15 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     frame: &Frame,
     max_bytes: usize,
 ) -> Result<(), FrameError> {
+    let body = encode(frame, max_bytes)?;
+    writer.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    writer.write_all(&body).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// The JSON bytes of one frame, refused if over the limit.
+pub fn encode(frame: &Frame, max_bytes: usize) -> Result<Vec<u8>, FrameError> {
     let body = serde_json::to_vec(frame).map_err(|e| FrameError::Malformed(e.to_string()))?;
     if body.len() > max_bytes {
         return Err(FrameError::TooLarge {
@@ -63,10 +79,11 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
             limit: max_bytes,
         });
     }
-    writer.write_all(&(body.len() as u32).to_be_bytes()).await?;
-    writer.write_all(&body).await?;
-    writer.flush().await?;
-    Ok(())
+    Ok(body)
+}
+
+pub fn decode(body: &[u8]) -> Result<Frame, FrameError> {
+    serde_json::from_slice(body).map_err(|e| FrameError::Malformed(e.to_string()))
 }
 
 #[cfg(test)]
