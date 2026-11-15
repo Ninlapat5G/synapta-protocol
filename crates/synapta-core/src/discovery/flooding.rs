@@ -69,7 +69,8 @@ pub(crate) fn publish_own_advert(state: &Arc<NodeState>) {
     let signed = {
         let mut own = state.own_advert.lock().unwrap();
         own.seq += 1;
-        let signed = advert::sign(&state.advert_now(own.seq), &state.identity);
+        let mut signed = advert::sign(&state.advert_now(own.seq), &state.identity);
+        signed.card = state.card.clone();
         own.signed = Some(signed.clone());
         signed
     };

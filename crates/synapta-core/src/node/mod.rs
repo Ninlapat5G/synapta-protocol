@@ -57,6 +57,7 @@ pub async fn start_with(config: NodeConfig, options: StartOptions) -> Result<Nod
     config.validate(policy).map_err(|errors| errors.join("; "))?;
     let trust = config.load_trust_store()?;
     let identity = NodeIdentity::load(config.node.id.clone(), &config.identity.private_key_file)?;
+    let card = config.load_card()?;
     std::fs::create_dir_all(&config.node.data_dir)
         .map_err(|e| format!("cannot create data_dir {}: {e}", config.node.data_dir.display()))?;
 
@@ -92,6 +93,7 @@ pub async fn start_with(config: NodeConfig, options: StartOptions) -> Result<Nod
     let state = Arc::new(NodeState::new(NodeStateParts {
         config,
         identity,
+        card,
         trust,
         policy,
         transport,

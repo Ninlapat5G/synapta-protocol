@@ -15,7 +15,7 @@ use crate::execution::job_events::JobEventLog;
 use crate::execution::jobs::JobManager;
 use crate::execution::{Executor, ExecutorRegistry};
 use crate::identity::{NodeIdentity, TrustStore};
-use crate::protocol::message::{CapabilityAdvert, NodeAdvert, ResourceState, SignedAdvert};
+use crate::protocol::message::{CapabilityAdvert, MemberCard, NodeAdvert, ResourceState, SignedAdvert};
 use crate::protocol::{NodeId, WireRange, SOFTWARE_VERSION};
 use crate::registry::Registry;
 use crate::routing::ledger::DispatchLedger;
@@ -26,6 +26,8 @@ use crate::transport::{AddressPolicy, Transport};
 pub(crate) struct NodeState {
     pub config: NodeConfig,
     pub identity: NodeIdentity,
+    /// This node's membership card, if it has one.
+    pub card: Option<MemberCard>,
     pub trust: TrustStore,
     pub policy: AddressPolicy,
     pub transport: Arc<dyn Transport>,
@@ -60,6 +62,7 @@ pub(crate) struct OwnAdvert {
 pub(crate) struct NodeStateParts {
     pub config: NodeConfig,
     pub identity: NodeIdentity,
+    pub card: Option<MemberCard>,
     pub trust: TrustStore,
     pub policy: AddressPolicy,
     pub transport: Arc<dyn Transport>,
@@ -87,6 +90,7 @@ impl NodeState {
             dialers: Mutex::new(HashMap::new()),
             config: parts.config,
             identity: parts.identity,
+            card: parts.card,
             trust: parts.trust,
             policy: parts.policy,
             transport: parts.transport,

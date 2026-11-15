@@ -21,7 +21,10 @@
 //! in the other) and everything else that travels in the clear, outside h: both node ids, the
 //! wire versions each side offered and the one chosen. Someone who edits an offer in transit —
 //! to push both sides onto an older version — makes the two transcripts differ, and the
-//! signatures fail. A node id that is not in the trust store is refused no matter what it claims.
+//! signatures fail. A node id that is neither listed in the trust store nor shows a valid
+//! membership card (`Hello::card`, `HelloAck::card`) is refused no matter what it claims. The
+//! card need not be signed again: it binds the id to a key, and the transcript signature proves
+//! the peer holds that key.
 //!
 //! In the clear: wire versions, both node ids and the ephemeral public keys. Everything after
 //! `HelloAck`, including errors, is encrypted by `transport::secure`.
@@ -34,7 +37,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::error::{ErrorBody, ErrorCode};
 use crate::identity::{from_hex, to_hex, NodeIdentity, TrustStore};
-use crate::protocol::message::{Frame, Hello, HelloAck, HelloFinish, HelloProof};
+use crate::protocol::message::{Frame, Hello, HelloAck, HelloFinish, HelloProof, MemberCard};
 use crate::protocol::{NodeId, WireRange};
 use crate::transport::framing::{read_frame, write_frame, FrameError};
 use crate::transport::secure::{self, Opener, Sealer};
@@ -50,6 +53,8 @@ const HANDSHAKE_FRAME_MAX: usize = 4096;
 pub struct HandshakeParams<'a> {
     pub identity: &'a NodeIdentity,
     pub trust: &'a TrustStore,
+    /// This node's membership card, shown to the peer (None: rely on being listed by name).
+    pub card: Option<&'a MemberCard>,
     pub max_frame_bytes: usize,
 }
 
@@ -76,6 +81,7 @@ pub async fn dial<S: AsyncRead + AsyncWrite + Unpin>(
         wire: WireRange::SUPPORTED,
         node_id: own_id.clone(),
         noise: to_hex(&buf[..len]),
+        card: params.card.cloned(),
     }))
     .await?;
 
@@ -104,8 +110,7 @@ pub async fn dial<S: AsyncRead + AsyncWrite + Unpin>(
             return wire.fail(ErrorCode::HandshakeFailed, msg).await;
         }
     }
-    if !params.trust.is_trusted(&ack.node_id) {
-        let msg = format!("{} is not in the trust configuration", ack.node_id);
+    if let Err(msg) = params.trust.admit(&ack.node_id, ack.card.as_ref()) {
         return wire.fail(ErrorCode::UntrustedPeer, msg).await;
     }
     if read_noise(&mut noise, &ack.noise).is_err() {
@@ -177,8 +182,7 @@ pub async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
     if &hello.node_id == own_id {
         return wire.fail(ErrorCode::HandshakeFailed, "connected to self".into()).await;
     }
-    if !params.trust.is_trusted(&hello.node_id) {
-        let msg = format!("{} is not in the trust configuration", hello.node_id);
+    if let Err(msg) = params.trust.admit(&hello.node_id, hello.card.as_ref()) {
         return wire.fail(ErrorCode::UntrustedPeer, msg).await;
     }
     let mut noise = noise_builder().build_responder().map_err(noise_error)?;
@@ -194,6 +198,7 @@ pub async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
         wire_version,
         node_id: own_id.clone(),
         noise: to_hex(&buf[..len]),
+        card: params.card.cloned(),
     }))
     .await?;
     let hash = noise.get_handshake_hash().to_vec();
@@ -407,6 +412,7 @@ mod tests {
         HandshakeParams {
             identity: &peer.identity,
             trust,
+            card: None,
             max_frame_bytes: 4096,
         }
     }
@@ -581,6 +587,7 @@ mod tests {
                 wire_version: 2,
                 node_id: b.identity.node_id.clone(),
                 noise: to_hex(&buf[..len]),
+                card: None,
             };
             write_frame(&mut s, &Frame::HelloAck(ack), 4096).await.unwrap();
         };
@@ -602,6 +609,7 @@ mod tests {
         let bp = HandshakeParams {
             identity: &b.identity,
             trust: &trust,
+            card: None,
             max_frame_bytes: 1 << 20,
         };
         assert_eq!(accept(&mut s, &bp).await.err().unwrap().code, ErrorCode::FrameTooLarge);
@@ -618,11 +626,13 @@ mod tests {
         let ap = HandshakeParams {
             identity: &a.identity,
             trust: &at,
+            card: None,
             max_frame_bytes: 1 << 20,
         };
         let bp = HandshakeParams {
             identity: &b.identity,
             trust: &bt,
+            card: None,
             max_frame_bytes: 1 << 20,
         };
         let (mut d, mut s) = tokio::io::duplex(1 << 16);

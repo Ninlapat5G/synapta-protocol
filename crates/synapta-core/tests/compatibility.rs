@@ -43,6 +43,7 @@ async fn dial_as_node_d(cluster: &Cluster) -> (TcpStream, Session) {
     let params = HandshakeParams {
         identity: &d,
         trust: &trust,
+        card: None,
         max_frame_bytes: 1 << 20,
     };
     match handshake::dial(&mut stream, &params, Some(&id("node-b"))).await {

@@ -281,6 +281,7 @@ async fn connect(
     let params = HandshakeParams {
         identity: &state.identity,
         trust: &state.trust,
+        card: state.card.as_ref(),
         max_frame_bytes: state.config.limits.max_frame_bytes,
     };
     let session = tokio::time::timeout(

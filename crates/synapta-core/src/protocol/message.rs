@@ -52,6 +52,10 @@ pub struct Hello {
     /// First Noise NN handshake message (the dialer's ephemeral key), hex.
     #[serde(default)]
     pub noise: String,
+    /// The dialer's membership card, for an acceptor that trusts its network's authority rather
+    /// than listing the dialer by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<MemberCard>,
 }
 
 /// Acceptor → dialer, in the clear.
@@ -67,6 +71,18 @@ pub struct HelloAck {
     /// Second Noise NN message (the acceptor's ephemeral key), hex.
     #[serde(default)]
     pub noise: String,
+    /// The acceptor's membership card. See [`Hello::card`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<MemberCard>,
+}
+
+/// A network authority's signed statement that a node id holds a public key in its network
+/// (`identity::CardClaims` in `payload`). Lets a node trust a peer nobody listed by name: it
+/// only needs to trust the authority. Verified in `identity::TrustStore::admit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemberCard {
+    pub payload: String,
+    pub signature: String,
 }
 
 /// Acceptor → dialer, encrypted: proof the acceptor holds its node key.
@@ -307,6 +323,10 @@ pub enum Availability {
 pub struct SignedAdvert {
     pub payload: String,
     pub signature: String,
+    /// The origin's membership card, so nodes that never met the origin can still check its
+    /// signature. Not part of the signed payload: the card carries its own signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<MemberCard>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -439,6 +459,7 @@ mod tests {
         let advert = SignedAdvert {
             payload: "{}".into(),
             signature: "00".into(),
+            card: None,
         };
         let requests = [
             Request::Ping,

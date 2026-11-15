@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::identity::{parse_verifying_key, TrustStore};
-use crate::protocol::message::Availability;
+use crate::identity::{parse_verifying_key, Authority, TrustStore};
+use crate::protocol::message::{Availability, MemberCard};
 use crate::protocol::{is_valid_capability_name, NodeId, NodeType};
 use crate::transport::AddressPolicy;
 
@@ -33,6 +33,9 @@ pub struct NodeConfig {
     pub capabilities: Vec<CapabilityConfig>,
     #[serde(default)]
     pub trust: Vec<TrustEntry>,
+    /// Network authorities whose membership cards this node accepts.
+    #[serde(default)]
+    pub trust_authority: Vec<AuthorityEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +55,9 @@ pub struct NodeSection {
 #[serde(deny_unknown_fields)]
 pub struct IdentitySection {
     pub private_key_file: PathBuf,
+    /// This node's membership card (JSON, as issued by its network authority).
+    #[serde(default)]
+    pub card_file: Option<PathBuf>,
 }
 
 /// Local HTTP API (UTCP tool endpoint + control). Optional per node.
@@ -198,6 +204,14 @@ pub struct TrustEntry {
     pub public_key_file: Option<PathBuf>,
 }
 
+/// A network authority: nodes showing a membership card it signed for `network` are trusted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityEntry {
+    pub network: String,
+    pub public_key: String,
+}
+
 impl NodeConfig {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read config {}: {e}", path.display()))?;
@@ -212,6 +226,9 @@ impl NodeConfig {
         let resolve = |p: &PathBuf| if p.is_absolute() { p.clone() } else { base.join(p) };
         self.node.data_dir = resolve(&self.node.data_dir);
         self.identity.private_key_file = resolve(&self.identity.private_key_file);
+        if let Some(card) = &self.identity.card_file {
+            self.identity.card_file = Some(resolve(card));
+        }
         for entry in &mut self.trust {
             if let Some(file) = &entry.public_key_file {
                 entry.public_key_file = Some(resolve(file));
@@ -329,7 +346,26 @@ impl NodeConfig {
                 parse_verifying_key(&hex).map_err(|e| format!("trust {}: invalid public key: {e}", entry.node_id))?;
             store.insert(entry.node_id.clone(), key);
         }
+        for entry in &self.trust_authority {
+            let key = parse_verifying_key(entry.public_key.trim())
+                .map_err(|e| format!("trust_authority {}: invalid public key: {e}", entry.network))?;
+            store.add_authority(Authority {
+                network: entry.network.clone(),
+                key,
+            });
+        }
         Ok(store)
+    }
+
+    /// This node's membership card, if the config names one.
+    pub fn load_card(&self) -> Result<Option<MemberCard>, String> {
+        let Some(file) = &self.identity.card_file else {
+            return Ok(None);
+        };
+        let text = std::fs::read_to_string(file).map_err(|e| format!("cannot read card {}: {e}", file.display()))?;
+        serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("invalid card {}: {e}", file.display()))
     }
 }
 

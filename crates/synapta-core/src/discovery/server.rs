@@ -70,6 +70,7 @@ async fn serve_connection(state: Arc<NodeState>, mut conn: BoxedConnection, remo
     let params = HandshakeParams {
         identity: &state.identity,
         trust: &state.trust,
+        card: state.card.as_ref(),
         max_frame_bytes: limits.max_frame_bytes,
     };
     let session = match tokio::time::timeout(ms(timeouts.handshake_ms), handshake::accept(&mut conn, &params)).await {

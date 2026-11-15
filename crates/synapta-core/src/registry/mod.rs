@@ -243,6 +243,7 @@ mod tests {
         let signed = SignedAdvert {
             payload: String::new(),
             signature: String::new(),
+            card: None,
         };
         (advert, signed)
     }

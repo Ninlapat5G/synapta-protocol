@@ -284,6 +284,7 @@ async fn test_07b_silent_peer_detected_by_heartbeat_timeout() {
             let params = HandshakeParams {
                 identity: &silent_identity,
                 trust: &trust,
+                card: None,
                 max_frame_bytes: 1 << 20,
             };
             if let Ok(mut session) = handshake::accept(&mut stream, &params).await {
@@ -421,6 +422,7 @@ async fn test_09_isolation_and_security() {
     let params = HandshakeParams {
         identity: &a_identity,
         trust: &trust,
+        card: None,
         max_frame_bytes: 1 << 20,
     };
     let Ok(mut session) = handshake::dial(&mut direct, &params, Some(&id("node-c"))).await else {
@@ -461,6 +463,7 @@ async fn test_09_isolation_and_security() {
     let params = HandshakeParams {
         identity: &outsider,
         trust: &trust_b,
+        card: None,
         max_frame_bytes: 1 << 20,
     };
     assert_eq!(

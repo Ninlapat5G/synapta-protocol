@@ -16,7 +16,11 @@ pub fn sign(advert: &NodeAdvert, identity: &NodeIdentity) -> SignedAdvert {
     // Serialising a plain struct of owned fields cannot fail.
     let payload = serde_json::to_string(advert).expect("advert serialises");
     let signature = identity.sign(&signed_bytes(&payload));
-    SignedAdvert { payload, signature }
+    SignedAdvert {
+        payload,
+        signature,
+        card: None,
+    }
 }
 
 /// Verifies the signature against the origin's trusted key and the advert's own sanity.
@@ -25,6 +29,10 @@ pub fn sign(advert: &NodeAdvert, identity: &NodeIdentity) -> SignedAdvert {
 pub fn verify(signed: &SignedAdvert, trust: &TrustStore, policy: AddressPolicy) -> Result<NodeAdvert, ErrorBody> {
     let advert: NodeAdvert = serde_json::from_str(&signed.payload)
         .map_err(|e| ErrorBody::new(ErrorCode::BadRequest, format!("advert payload: {e}")))?;
+    // A node we never met (one in another ring) is trusted through the card it attached.
+    trust
+        .admit(&advert.node_id, signed.card.as_ref())
+        .map_err(|e| ErrorBody::new(ErrorCode::UntrustedPeer, format!("advert: {e}")))?;
     if !trust.verify(&advert.node_id, &signed_bytes(&signed.payload), &signed.signature) {
         return Err(ErrorBody::new(
             ErrorCode::UntrustedPeer,
