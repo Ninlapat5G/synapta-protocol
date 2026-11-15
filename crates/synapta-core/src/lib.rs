@@ -1,4 +1,4 @@
-//! Synapta Protocol v0.0.2 — peer-to-peer node discovery, capability routing and remote
+//! Synapta Protocol — peer-to-peer node discovery, capability routing and remote
 //! execution. See `docs/architecture.md` for how the modules fit together.
 //!
 //! | module        | job                                                         |
@@ -11,6 +11,7 @@
 //! | `routing`     | deterministic policy (`decide`) and its execution (`dispatch`) |
 //! | `execution`   | executor interface, built-in mocks, job lifecycle           |
 //! | `node`        | wiring, public `NodeHandle` API, shutdown                   |
+//! | `trace`       | optional report of every frame sent/received (for the lab)  |
 
 pub mod config;
 pub mod discovery;
@@ -21,6 +22,7 @@ pub mod node;
 pub mod protocol;
 pub mod registry;
 pub mod routing;
+pub mod trace;
 pub mod transport;
 
 use std::future::Future;
@@ -30,5 +32,5 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub use config::NodeConfig;
 pub use error::{ErrorBody, ErrorCode};
-pub use node::{start, NodeHandle, NodeStatus};
+pub use node::{start, start_with, NodeHandle, NodeStatus, StartOptions};
 pub use protocol::NodeId;

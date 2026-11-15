@@ -29,6 +29,7 @@ use crate::protocol::{NodeId, WireRange, SOFTWARE_VERSION};
 use crate::registry::{PeerState, PeerView};
 use crate::routing::dispatch::{self, decode, RouteFailure, Routed};
 use crate::routing::RoutingDecision;
+use crate::trace::{TraceSink, Tracer};
 use crate::transport::tcp::TcpTransport;
 use crate::transport::{AddressPolicy, Transport};
 use state::{NodeState, NodeStateParts};
@@ -36,6 +37,22 @@ use state::{NodeState, NodeStateParts};
 /// Starts a node from its configuration. Returns once the listener is bound; peers connect in
 /// the background (use [`NodeHandle::wait_until`] to wait for them).
 pub async fn start(config: NodeConfig) -> Result<NodeHandle, String> {
+    start_with(config, StartOptions::default()).await
+}
+
+/// What an embedding program (synapta-lab, tests) can plug into a node. The defaults are what
+/// `synapta-node` runs with.
+#[derive(Default, Clone)]
+pub struct StartOptions {
+    /// How the node listens and dials. Default: plain TCP under the loopback policy. The policy
+    /// still applies to the config and to every address learned from adverts either way.
+    pub transport: Option<Arc<dyn Transport>>,
+    /// Receives a report of every frame sent and received. Default: none (nothing is built).
+    pub trace: Option<TraceSink>,
+}
+
+/// [`start`] with a custom transport and/or trace sink.
+pub async fn start_with(config: NodeConfig, options: StartOptions) -> Result<NodeHandle, String> {
     let policy = AddressPolicy::LoopbackOnly;
     config.validate(policy).map_err(|errors| errors.join("; "))?;
     let trust = config.load_trust_store()?;
@@ -44,7 +61,9 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle, String> {
         .map_err(|e| format!("cannot create data_dir {}: {e}", config.node.data_dir.display()))?;
 
     let (executors, capabilities) = offered_capabilities(&config)?;
-    let transport: Arc<dyn Transport> = Arc::new(TcpTransport::new(policy, ms(config.timeouts.connect_ms)));
+    let transport = options
+        .transport
+        .unwrap_or_else(|| Arc::new(TcpTransport::new(policy, ms(config.timeouts.connect_ms))));
     let listener = transport
         .bind(config.node.listen)
         .await
@@ -68,6 +87,7 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle, String> {
         shutdown.clone(),
     );
     let seeds = config.discovery.seeds.clone();
+    let tracer = Tracer::new(config.node.id.clone(), options.trace);
     let data_dir = config.node.data_dir.clone();
     let state = Arc::new(NodeState::new(NodeStateParts {
         config,
@@ -81,6 +101,7 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle, String> {
         capabilities,
         jobs,
         load_changed,
+        tracer,
         shutdown,
         tasks,
     }));

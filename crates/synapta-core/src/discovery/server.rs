@@ -25,6 +25,8 @@ use crate::execution::EventSink;
 use crate::node::service;
 use crate::node::state::NodeState;
 use crate::protocol::message::{Frame, Notification, Request, ResponseFrame};
+use crate::protocol::NodeId;
+use crate::trace::{Channel, Tracer};
 use crate::transport::framing::FrameError;
 use crate::transport::secure::Sealer;
 use crate::transport::{BoxedConnection, Listener};
@@ -91,7 +93,10 @@ async fn serve_connection(state: Arc<NodeState>, mut conn: BoxedConnection, remo
     let (mut reader, writer) = tokio::io::split(conn);
     let (tx, rx) = mpsc::channel(OUTBOUND_QUEUE);
     let closed = state.shutdown.child_token();
-    state.tasks.spawn(write_loop(writer, sealer, rx, closed.clone()));
+    let writer_trace = (state.tracer.clone(), peer.clone());
+    state
+        .tasks
+        .spawn(write_loop(writer, sealer, rx, closed.clone(), writer_trace));
     let inflight = Arc::new(Semaphore::new(limits.max_inflight_requests_per_connection));
 
     loop {
@@ -118,6 +123,7 @@ async fn serve_connection(state: Arc<NodeState>, mut conn: BoxedConnection, remo
             }
             Ok(Ok(frame)) => frame,
         };
+        state.tracer.received(&peer, Channel::Inbound, &frame);
         match frame {
             // Answered right here, outside the in-flight limit. A ping used to take a slot like
             // any request: with the slots full it came back `busy`, the dialer read that as a
@@ -175,6 +181,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     mut sealer: Sealer,
     mut rx: mpsc::Receiver<Frame>,
     closed: CancellationToken,
+    (tracer, peer): (Tracer, NodeId),
 ) {
     loop {
         let frame = tokio::select! {
@@ -186,6 +193,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                         if sealer.write_frame(&mut writer, &frame).await.is_err() {
                             break;
                         }
+                        tracer.sent(&peer, Channel::Inbound, &frame);
                     }
                 })
                 .await;
@@ -197,5 +205,6 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             closed.cancel();
             return;
         }
+        tracer.sent(&peer, Channel::Inbound, &frame);
     }
 }

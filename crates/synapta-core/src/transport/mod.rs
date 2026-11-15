@@ -7,6 +7,7 @@
 
 pub mod framing;
 pub mod secure;
+pub mod sim;
 pub mod tcp;
 
 use std::io;

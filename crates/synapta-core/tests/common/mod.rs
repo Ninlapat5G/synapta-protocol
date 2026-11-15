@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use synapta_core::identity::{generate_keypair, parse_signing_key, NodeIdentity};
-use synapta_core::{NodeConfig, NodeHandle, NodeId};
+use synapta_core::{NodeConfig, NodeHandle, NodeId, StartOptions};
 use tempfile::TempDir;
 
 pub const WAIT: Duration = Duration::from_secs(10);
@@ -87,9 +87,18 @@ impl Cluster {
 
     /// Like `start`, with a last change to every node's config before it starts.
     pub async fn start_with(specs: Vec<NodeSpec>, adjust: impl Fn(&mut NodeConfig)) -> Cluster {
+        Self::start_custom(specs, adjust, |_| StartOptions::default()).await
+    }
+
+    /// Like `start_with`, and each node starts with the options `options` gives for its config.
+    pub async fn start_custom(
+        specs: Vec<NodeSpec>,
+        adjust: impl Fn(&mut NodeConfig),
+        options: impl Fn(&NodeConfig) -> StartOptions,
+    ) -> Cluster {
         let dir = tempfile::tempdir().unwrap();
         // node-d is a spare identity for fake peers built inside tests.
-        let ids = ["node-a", "node-b", "node-c", "node-d"];
+        let ids = ["node-a", "node-b", "node-c", "node-d", "node-e", "node-f"];
         let keys: Vec<(String, Keys)> = ids.iter().map(|id| (id.to_string(), keys())).collect();
         let mut cluster = Cluster {
             dir,
@@ -99,7 +108,8 @@ impl Cluster {
         for spec in specs {
             let mut config = cluster.config_for(&spec);
             adjust(&mut config);
-            let node = synapta_core::start(config).await.unwrap();
+            let start = options(&config);
+            let node = synapta_core::start_with(config, start).await.unwrap();
             cluster.nodes.push(node);
         }
         cluster

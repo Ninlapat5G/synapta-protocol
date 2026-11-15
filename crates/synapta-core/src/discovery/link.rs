@@ -30,6 +30,7 @@ use crate::node::state::NodeState;
 use crate::protocol::message::{Frame, Notification, Request, RequestFrame, ResponseFrame, SignedAdvert};
 use crate::protocol::NodeId;
 use crate::registry::PeerState;
+use crate::trace::{Channel, Tracer};
 use crate::transport::secure::Sealer;
 use crate::transport::BoxedConnection;
 
@@ -313,8 +314,11 @@ async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, session: Sessio
     }
     state.registry_changed();
     tracing::info!(peer = %peer, "peer READY");
+    state.tracer.link_up(&peer);
 
-    state.tasks.spawn(write_loop(writer, sealer, rx, link.clone()));
+    state
+        .tasks
+        .spawn(write_loop(writer, sealer, rx, link.clone(), state.tracer.clone()));
     state.tasks.spawn(heartbeat_loop(state.clone(), link.clone()));
     state.tasks.spawn(sync_adverts(state.clone(), link.clone()));
 
@@ -324,6 +328,9 @@ async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, session: Sessio
             _ = link.inner.closed.cancelled() => break LinkEnd::Lost(link.close_reason()),
             frame = opener.read_frame(&mut reader) => frame,
         };
+        if let Ok(frame) = &frame {
+            state.tracer.received(&peer, Channel::Outbound, frame);
+        }
         match frame {
             Ok(Frame::Response(response)) => link.complete(response),
             Ok(Frame::Event(event)) => state.job_events.record(&peer, event),
@@ -340,6 +347,7 @@ async fn run_link(state: &Arc<NodeState>, conn: BoxedConnection, session: Sessio
         LinkEnd::Lost(reason) => reason.clone(),
     };
     link.close(reason.clone());
+    state.tracer.link_down(&peer, &reason);
     state
         .registry
         .write()
@@ -354,6 +362,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     mut sealer: Sealer,
     mut rx: mpsc::Receiver<Frame>,
     link: LinkHandle,
+    tracer: Tracer,
 ) {
     loop {
         let frame = tokio::select! {
@@ -365,6 +374,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             link.close(format!("write failed: {e}"));
             return;
         }
+        tracer.sent(link.peer(), Channel::Outbound, &frame);
     }
 }
 

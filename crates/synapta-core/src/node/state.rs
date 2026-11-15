@@ -20,6 +20,7 @@ use crate::protocol::{NodeId, WireRange, SOFTWARE_VERSION};
 use crate::registry::Registry;
 use crate::routing::ledger::DispatchLedger;
 use crate::routing::RoutingDecision;
+use crate::trace::Tracer;
 use crate::transport::{AddressPolicy, Transport};
 
 pub(crate) struct NodeState {
@@ -46,6 +47,7 @@ pub(crate) struct NodeState {
     /// Addresses with a running dialer task (at most one per address), each with the signal
     /// that cuts its current wait short.
     pub dialers: Mutex<HashMap<SocketAddr, Arc<Notify>>>,
+    pub tracer: Tracer,
     pub shutdown: CancellationToken,
     pub tasks: TaskTracker,
 }
@@ -67,6 +69,7 @@ pub(crate) struct NodeStateParts {
     pub capabilities: Vec<CapabilityAdvert>,
     pub jobs: JobManager,
     pub load_changed: Arc<Notify>,
+    pub tracer: Tracer,
     pub shutdown: CancellationToken,
     pub tasks: TaskTracker,
 }
@@ -93,6 +96,7 @@ impl NodeState {
             capabilities: parts.capabilities,
             jobs: parts.jobs,
             load_changed: parts.load_changed,
+            tracer: parts.tracer,
             shutdown: parts.shutdown,
             tasks: parts.tasks,
         }

@@ -129,6 +129,20 @@ impl Request {
         "job.result",
         "job.cancel",
     ];
+
+    /// The wire name of this request's method; `"unknown"` for one this build does not know.
+    pub fn method(&self) -> &'static str {
+        match self {
+            Request::Ping => "ping",
+            Request::SyncAdverts { .. } => "adverts.sync",
+            Request::Invoke { .. } => "invoke",
+            Request::JobSubmit { .. } => "job.submit",
+            Request::JobStatus { .. } => "job.status",
+            Request::JobResult { .. } => "job.result",
+            Request::JobCancel { .. } => "job.cancel",
+            Request::Unknown => "unknown",
+        }
+    }
 }
 
 with_unknown_methods!(Request);
@@ -450,6 +464,7 @@ mod tests {
         for request in requests {
             let text = serde_json::to_string(&request).unwrap();
             assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request, "{text}");
+            assert!(text.contains(&format!("\"{}\"", request.method())), "{text}");
         }
         let notification = Notification::Advert(advert);
         let text = serde_json::to_string(&notification).unwrap();
