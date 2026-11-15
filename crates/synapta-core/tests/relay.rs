@@ -15,8 +15,8 @@ use synapta_core::protocol::message::{
     Envelope, Frame, JobState, RelayReply, RelayRequest, Request, RequestFrame, ResponseFrame, SignedPayload,
 };
 use synapta_core::transport::sim::SimNetwork;
+use synapta_core::transport::BoxedConnection;
 use synapta_core::{ErrorCode, NodeConfig, NodeHandle, StartOptions};
-use tokio::net::TcpStream;
 
 const IDS: [&str; 6] = ["node-a", "node-b", "node-c", "node-d", "node-e", "node-f"];
 
@@ -193,8 +193,8 @@ async fn when_a_bridge_goes_down_the_other_one_is_used() {
 
 // --- envelopes that must not get through ---------------------------------------------------
 
-/// A raw link to node-d as node-e, which node-d trusts.
-async fn link_as_node_e(cluster: &Cluster) -> (TcpStream, Session) {
+/// A raw link to node-d as node-e, which node-d trusts, plugged into node-d's ring.
+async fn link_as_node_e(network: &Arc<SimNetwork>, cluster: &Cluster) -> (BoxedConnection, Session) {
     let e = identity("node-e", cluster.key("node-e"));
     let mut trust = TrustStore::default();
     trust.insert(
@@ -207,7 +207,9 @@ async fn link_as_node_e(cluster: &Cluster) -> (TcpStream, Session) {
         card: None,
         max_frame_bytes: 1 << 20,
     };
-    let mut stream = TcpStream::connect(cluster.node("node-d").listen_addr()).await.unwrap();
+    network.set_rings(&id("node-e"), ["r1"]);
+    let transport = network.transport(id("node-e"), "127.0.0.250".parse().unwrap(), ms(2_000));
+    let mut stream = transport.dial(cluster.node("node-d").listen_addr()).await.unwrap();
     match handshake::dial(&mut stream, &params, Some(&id("node-d"))).await {
         Ok(session) => (stream, session),
         Err(e) => panic!("handshake with node-d failed: {e}"),
@@ -232,7 +234,7 @@ fn envelope(cluster: &Cluster, from: &str, signer: &str) -> SignedPayload {
 }
 
 async fn relay(
-    stream: &mut TcpStream,
+    stream: &mut BoxedConnection,
     session: &mut Session,
     request_id: u64,
     envelope: SignedPayload,
@@ -257,7 +259,7 @@ async fn forged_and_replayed_envelopes_are_refused() {
     let network = SimNetwork::new();
     rings(&network, &[("node-d", &["r1"])]);
     let cluster = start(&network, vec![spec("node-d", &[], &["node-a", "node-e"])]).await;
-    let (mut stream, mut session) = link_as_node_e(&cluster).await;
+    let (mut stream, mut session) = link_as_node_e(&network, &cluster).await;
 
     // node-e passes on an envelope claiming to be node-a's, signed by itself.
     let forged = relay(&mut stream, &mut session, 1, envelope(&cluster, "node-a", "node-e")).await;
@@ -282,7 +284,7 @@ async fn a_hop_without_a_path_says_unreachable() {
     let network = SimNetwork::new();
     rings(&network, &[("node-d", &["r1"])]);
     let cluster = start(&network, vec![spec("node-d", &[], &["*"])]).await;
-    let (mut stream, mut session) = link_as_node_e(&cluster).await;
+    let (mut stream, mut session) = link_as_node_e(&network, &cluster).await;
     let frame = Frame::Request(RequestFrame {
         id: 1,
         request: Request::Relay(RelayRequest {

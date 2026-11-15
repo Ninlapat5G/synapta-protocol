@@ -115,7 +115,7 @@ impl FrameSummary {
             }
             Frame::Notify(Notification::Advert(signed)) => FrameSummary {
                 method: Some("advert"),
-                detail: advert::claimed_origin(signed).map(|origin| origin.to_string()),
+                detail: advert_origin(&signed.payload),
                 ..summary("notify")
             },
             Frame::Notify(Notification::Unknown) => FrameSummary {
@@ -133,6 +133,17 @@ impl FrameSummary {
     }
 }
 
+/// The origin an advert payload names, read from its start: `node_id` is the first field
+/// `NodeAdvert` serialises. Parsing the whole payload (kilobytes, with every neighbour) for every
+/// traced advert stalled a lab of 100 nodes; the full parse is only the fallback.
+fn advert_origin(payload: &str) -> Option<String> {
+    let quick = payload
+        .strip_prefix(r#"{"node_id":""#)
+        .and_then(|rest| rest.split_once('"'))
+        .map(|(id, _)| id.to_string());
+    quick.or_else(|| advert::claimed_origin_of(payload).map(|id| id.to_string()))
+}
+
 /// The code as it appears on the wire (`busy`, `timeout`, ...).
 fn code_name(code: ErrorCode) -> String {
     serde_json::to_value(code)
@@ -147,7 +158,7 @@ fn request_detail(request: &Request) -> Option<String> {
         Request::JobStatus { job_id } | Request::JobResult { job_id, .. } | Request::JobCancel { job_id } => {
             Some(job_id.clone())
         }
-        Request::SyncAdverts { adverts } => Some(format!("{} adverts", adverts.len())),
+        Request::SyncAdverts { known } => Some(format!("{} known", known.len())),
         Request::Relay(relay) => {
             let inner = serde_json::from_str::<Envelope>(&relay.envelope.payload)
                 .map(|e| format!(" {} from {}", e.request.method(), e.from))

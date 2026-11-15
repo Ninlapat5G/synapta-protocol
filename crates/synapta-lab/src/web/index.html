@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synapta Lab</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><span class="logo">◈</span> Synapta Lab <span id="version" class="muted"></span></div>
+  <div class="tools" role="toolbar" aria-label="Map tools">
+    <button data-tool="select" class="tool active" title="Select and drag (Esc)">Select</button>
+    <button data-tool="cable" class="tool" title="Click a node, then a ring, to plug it in">Cable</button>
+    <button data-tool="cut" class="tool" title="Click a cable to unplug it">Cut</button>
+    <span class="sep"></span>
+    <button id="add-node" title="Add one node in the middle of the view">+ Node</button>
+    <button id="add-ring" title="Add a ring (a network nodes plug into)">+ Ring</button>
+    <button id="add-many" title="Add many nodes at once">+ Many</button>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+
+<main class="layout">
+  <section class="map-wrap" id="map-wrap">
+    <svg id="map" aria-label="Network map">
+      <defs>
+        <filter id="glow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      <g id="viewport">
+        <g id="layer-links"></g>
+        <g id="layer-cables"></g>
+        <g id="layer-rings"></g>
+        <g id="layer-nodes"></g>
+        <g id="layer-packets"></g>
+        <line id="cable-preview" class="cable-preview" visibility="hidden"></line>
+      </g>
+    </svg>
+    <div class="map-hint" id="map-hint"></div>
+    <div class="zoom">
+      <button id="zoom-in" aria-label="Zoom in">+</button>
+      <button id="zoom-out" aria-label="Zoom out">−</button>
+      <button id="zoom-fit" aria-label="Fit to view">⤢</button>
+    </div>
+    <div class="legend" id="legend">
+      <span><i style="background:var(--p-ping)"></i>ping</span>
+      <span><i style="background:var(--p-advert)"></i>adverts</span>
+      <span><i style="background:var(--p-work)"></i>invoke / job</span>
+      <span><i style="background:var(--p-relay)"></i>relay</span>
+      <span><i style="background:var(--p-ok)"></i>reply</span>
+      <span><i style="background:var(--p-err)"></i>error</span>
+    </div>
+    <div class="empty" id="empty">
+      <p><b>No nodes yet.</b></p>
+      <p>Press <b>+ Ring</b> and <b>+ Node</b>, then use <b>Cable</b> to plug nodes into rings,<br>
+      or build a ready-made network from the <b>Scenarios</b> tab.</p>
+    </div>
+  </section>
+
+  <aside class="side">
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="node" class="active">Node</button>
+      <button role="tab" data-tab="call">Call</button>
+      <button role="tab" data-tab="scenarios">Scenarios</button>
+      <button role="tab" data-tab="network">Network</button>
+    </nav>
+
+    <div class="tab" id="tab-node">
+      <p class="muted" id="node-none">Click a node on the map.</p>
+      <div id="node-panel" hidden>
+        <div class="node-head">
+          <h2 id="node-title"></h2><span id="node-state" class="pill"></span>
+        </div>
+        <div class="row gap">
+          <button id="power-on">Power on</button>
+          <button id="power-off">Shut down</button>
+          <button id="power-crash" class="warn" title="Goes silent first; peers only notice through heartbeats">Crash</button>
+          <button id="node-delete" class="danger">Delete</button>
+        </div>
+        <dl class="facts" id="node-facts"></dl>
+        <details open>
+          <summary>Setup</summary>
+          <form id="node-form" class="form">
+            <label>Name <input name="name" placeholder="(same as id)"></label>
+            <label>Type <select name="node_type">
+              <option>server</option><option>desktop</option><option>mobile</option>
+              <option>embedded</option><option>edge</option><option>client</option></select></label>
+            <label>Rings <input name="rings" placeholder="home, office"></label>
+            <fieldset><legend>Capabilities <span class="muted">(allow: ids or *)</span></legend>
+              <div id="cap-list"></div></fieldset>
+            <div class="grid3">
+              <label>Max jobs <input name="max_concurrent_jobs" type="number" min="1" max="1000"></label>
+              <label>CPU % <input name="cpu_percent" type="number" min="0" max="100"></label>
+              <label>Memory MB <input name="memory_mb" type="number" min="0"></label>
+            </div>
+            <label>Availability <select name="availability">
+              <option>available</option><option>draining</option><option>unavailable</option></select></label>
+            <button type="submit" class="primary">Apply</button>
+            <p class="muted small">Changing rings moves cables live. Any other change restarts the node.</p>
+          </form>
+        </details>
+        <details open>
+          <summary>Routes <span class="muted small">how this node reaches the others</span></summary>
+          <table class="table" id="routes"></table>
+        </details>
+      </div>
+    </div>
+
+    <div class="tab" id="tab-call" hidden>
+      <form id="call-form" class="form">
+        <label>From <select name="from" id="call-from"></select></label>
+        <label>Capability <select name="capability" id="call-capability"></select></label>
+        <label>Target <select name="target" id="call-target"><option value="">best node (routing decides)</option></select></label>
+        <label>Input (JSON) <textarea name="input" id="call-input" rows="4" spellcheck="false"></textarea></label>
+        <div class="row gap">
+          <button type="submit" data-action="invoke" class="primary">Invoke</button>
+          <button type="submit" data-action="submit">Submit job</button>
+          <button type="submit" data-action="explain">Explain only</button>
+        </div>
+      </form>
+      <div id="call-result"></div>
+      <h3>Jobs</h3>
+      <div id="jobs"><p class="muted small">Jobs you submit show up here.</p></div>
+    </div>
+
+    <div class="tab" id="tab-scenarios" hidden>
+      <form class="scenario form" data-scenario="rings">
+        <h3>Build rings</h3>
+        <p class="muted small">Replaces the lab: a chain of rings, each pair joined by one bridge node.</p>
+        <div class="grid3">
+          <label>Rings <input name="rings" type="number" value="3" min="1"></label>
+          <label>Nodes per ring <input name="per_ring" type="number" value="4" min="1"></label>
+        </div>
+        <button class="primary">Build</button>
+      </form>
+      <form class="scenario form" data-scenario="burst">
+        <h3>Burst of calls</h3>
+        <p class="muted small">Many calls at once from one node; see where they ran.</p>
+        <div class="grid3">
+          <label>From <select name="from" class="node-select"></select></label>
+          <label>Calls <input name="count" type="number" value="20" min="1"></label>
+          <label>Capability <select name="capability" class="cap-select"></select></label>
+        </div>
+        <button class="primary">Run</button>
+      </form>
+      <form class="scenario form" data-scenario="crash_during_jobs">
+        <h3>Crash during jobs</h3>
+        <p class="muted small">Starts 4 s test jobs, crashes the node running the first one.</p>
+        <div class="grid3">
+          <label>From <select name="from" class="node-select"></select></label>
+          <label>Jobs <input name="jobs" type="number" value="4" min="1"></label>
+        </div>
+        <button class="primary">Run</button>
+      </form>
+      <form class="scenario form" data-scenario="cut_bridge">
+        <h3>Cut a bridge</h3>
+        <p class="muted small">Unplugs a node that sits in two rings from one of them.</p>
+        <label>Bridge <select name="bridge" class="bridge-select"></select></label>
+        <button class="primary">Cut</button>
+      </form>
+      <pre class="report" id="scenario-report" hidden></pre>
+    </div>
+
+    <div class="tab" id="tab-network" hidden>
+      <div class="row gap">
+        <button id="save">Save topology</button>
+        <label class="button">Load topology<input type="file" id="load" accept="application/json,.json" hidden></label>
+        <button id="reset" class="danger">Remove all</button>
+      </div>
+      <label class="check"><input type="checkbox" id="show-links"> Show live links between nodes</label>
+      <button id="arrange">Tidy up the map</button>
+      <h3>Rings</h3>
+      <table class="table" id="ring-table"></table>
+    </div>
+  </aside>
+</main>
+
+<footer class="trace" id="trace">
+  <div class="trace-bar">
+    <div class="seg" role="group" aria-label="Mode">
+      <button id="mode-live" class="active">Live</button>
+      <button id="mode-replay">Replay</button>
+    </div>
+    <div class="replay" id="replay-controls" hidden>
+      <button id="step-back" title="Step back" aria-label="Step back">⏮</button>
+      <button id="play" title="Play / pause" aria-label="Play">▶</button>
+      <button id="step-fwd" title="Step forward" aria-label="Step forward">⏭</button>
+      <input type="range" id="scrub" min="0" max="0" value="0" aria-label="Position">
+      <span id="cursor" class="muted small"></span>
+    </div>
+    <label class="small">Speed <select id="speed">
+      <option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option>
+      <option value="2">2×</option><option value="4">4×</option></select></label>
+    <label class="check small"><input type="checkbox" id="hide-ping" checked> hide ping</label>
+    <label class="check small"><input type="checkbox" id="hide-adverts"> hide adverts</label>
+    <label class="small">Node <select id="trace-node"><option value="">all</option></select></label>
+    <button id="trace-clear" class="small">Clear</button>
+    <button id="trace-toggle" class="small" aria-label="Collapse log">▾</button>
+  </div>
+  <div class="trace-log" id="trace-log">
+    <table class="table mono" id="trace-table">
+      <thead><tr><th>#</th><th>time</th><th>from</th><th></th><th>to</th><th>message</th><th>detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</footer>
+
+<dialog id="many-dialog">
+  <form method="dialog" class="form" id="many-form">
+    <h3>Add many nodes</h3>
+    <div class="grid3">
+      <label>How many <input name="count" type="number" value="10" min="1" max="5000"></label>
+      <label>Id prefix <input name="prefix" value="n" pattern="[a-z0-9][a-z0-9-]*"></label>
+    </div>
+    <label>Rings <input name="rings" placeholder="ring-1"></label>
+    <label>Capabilities <input name="caps" value="math.add, test.execute"></label>
+    <div class="row gap"><button value="add" class="primary">Add</button><button value="cancel">Cancel</button></div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>

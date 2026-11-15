@@ -112,9 +112,12 @@ pub struct RequestFrame {
 pub enum Request {
     #[serde(rename = "ping")]
     Ping,
-    /// Exchange full link-state databases right after a link becomes READY.
+    /// First exchange on a new link. Carries the versions this node holds, not the adverts:
+    /// the answer ([`SyncAdvertsResult`]) holds only the adverts the caller lacks and names the
+    /// ones the answering node lacks, which the caller then sends as `advert` notifications.
+    /// (Sending whole databases cost N adverts per link: far too much in a big ring.)
     #[serde(rename = "adverts.sync")]
-    SyncAdverts { adverts: Vec<SignedAdvert> },
+    SyncAdverts { known: Vec<AdvertVersion> },
     /// Execute a capability on the receiving node and wait for the result.
     /// The receiver executes it or refuses; it never passes it on (that is what `relay` is for).
     #[serde(rename = "invoke")]
@@ -299,6 +302,24 @@ use with_unknown_methods;
 // ---------------------------------------------------------------------------------------------
 
 /// What a node says about itself. Flooded to every peer and relayed hop by hop.
+/// Which advert of a node someone holds: `(incarnation, seq)` orders them (see `NodeAdvert`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvertVersion {
+    pub node_id: NodeId,
+    pub incarnation: u64,
+    pub seq: u64,
+}
+
+/// Answer to `adverts.sync`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncAdvertsResult {
+    /// Adverts the caller did not have, or had an older version of.
+    pub adverts: Vec<SignedAdvert>,
+    /// Nodes whose advert the caller holds in a newer version than the answering node (or the
+    /// answering node does not know at all): send them as `advert` notifications.
+    pub want: Vec<NodeId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeAdvert {
     pub node_id: NodeId,
@@ -518,7 +539,11 @@ mod tests {
         let requests = [
             Request::Ping,
             Request::SyncAdverts {
-                adverts: vec![advert.clone()],
+                known: vec![AdvertVersion {
+                    node_id: NodeId::new("node-a").unwrap(),
+                    incarnation: 1,
+                    seq: 2,
+                }],
             },
             Request::Invoke {
                 capability: "math.add".into(),

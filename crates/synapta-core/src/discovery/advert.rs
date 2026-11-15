@@ -6,7 +6,7 @@
 
 use crate::error::{ErrorBody, ErrorCode};
 use crate::identity::{NodeIdentity, TrustStore};
-use crate::protocol::message::{NodeAdvert, SignedAdvert};
+use crate::protocol::message::{AdvertVersion, NodeAdvert, SignedAdvert};
 use crate::protocol::NodeId;
 use crate::transport::AddressPolicy;
 
@@ -55,9 +55,17 @@ pub fn verify(signed: &SignedAdvert, trust: &TrustStore, policy: AddressPolicy) 
 
 /// The node id an advert claims, without verifying it. Never use it to trust anything.
 pub fn claimed_origin(signed: &SignedAdvert) -> Option<NodeId> {
-    serde_json::from_str::<NodeAdvert>(&signed.payload)
-        .ok()
-        .map(|a| a.node_id)
+    claimed_origin_of(&signed.payload)
+}
+
+pub fn claimed_origin_of(payload: &str) -> Option<NodeId> {
+    serde_json::from_str::<AdvertVersion>(payload).ok().map(|c| c.node_id)
+}
+
+/// Origin and version the payload claims, read without checking the signature (cheap: only
+/// three fields are parsed). Only for dropping adverts that would be dropped anyway.
+pub fn claimed(signed: &SignedAdvert) -> Option<AdvertVersion> {
+    serde_json::from_str(&signed.payload).ok()
 }
 
 fn signed_bytes(payload: &str) -> Vec<u8> {

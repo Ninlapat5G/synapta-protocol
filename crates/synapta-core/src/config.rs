@@ -97,7 +97,8 @@ pub struct Timeouts {
     pub advert_refresh_ms: u64,
     /// Adverts not refreshed for this long are dropped (peer forgotten unless linked).
     pub advert_max_age_ms: u64,
-    /// Load changes are coalesced so a burst of jobs does not flood one advert per job.
+    /// Load and link changes are coalesced so a burst of jobs does not flood one advert per job.
+    /// This is the pause per 10 links: a node with 150 links waits 15 times as long.
     pub advert_min_interval_ms: u64,
     pub job_retention_ms: u64,
     pub max_job_duration_ms: u64,

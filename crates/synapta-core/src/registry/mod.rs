@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::discovery::link::LinkHandle;
-use crate::protocol::message::{NodeAdvert, SignedAdvert};
+use crate::protocol::message::{AdvertVersion, NodeAdvert, SignedAdvert};
 use crate::protocol::NodeId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -165,8 +165,32 @@ impl Registry {
         self.ready_link(node_id).is_some()
     }
 
-    pub fn signed_adverts(&self) -> Vec<SignedAdvert> {
-        self.peers.values().filter_map(|e| e.signed.clone()).collect()
+    /// The version of every advert held, for `adverts.sync`.
+    pub fn advert_versions(&self) -> Vec<AdvertVersion> {
+        self.peers
+            .iter()
+            .filter_map(|(id, e)| {
+                let (incarnation, seq) = e.advert.as_ref()?.version();
+                Some(AdvertVersion {
+                    node_id: id.clone(),
+                    incarnation,
+                    seq,
+                })
+            })
+            .collect()
+    }
+
+    /// The nodes `node_id` last advertised READY links to.
+    pub fn neighbors_of(&self, node_id: &NodeId) -> Vec<NodeId> {
+        self.peers
+            .get(node_id)
+            .and_then(|e| e.advert.as_ref())
+            .map(|a| a.neighbors.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn signed_advert(&self, node_id: &NodeId) -> Option<SignedAdvert> {
+        self.peers.get(node_id)?.signed.clone()
     }
 
     /// Forgets peers whose advert was not refreshed within `max_age` and that have no link.

@@ -1,5 +1,6 @@
-//! Simulated network for running many nodes in one process (synapta-lab, tests): real TCP on
-//! loopback, real handshakes and encryption — only *who can reach whom* is simulated.
+//! Simulated network for running many nodes in one process (synapta-lab, tests): real
+//! handshakes, encryption and framing over in-memory pipes — only the wire and *who can reach
+//! whom* are simulated.
 //!
 //! Nodes join named rings. Two nodes can connect only if they share a ring, the way two
 //! machines can only talk when they are on the same network. A node in several rings bridges
@@ -8,8 +9,11 @@
 //! the way a pulled cable behaves, so the nodes find out through their own heartbeats and
 //! timeouts rather than from a clean close.
 //!
-//! Each node should listen on its own loopback address (127.x.y.z). Its dials leave from that
-//! address too: with every node on 127.0.0.1, a big ring would exhaust the ephemeral ports.
+//! Why pipes and not loopback TCP: every pair of nodes holds two connections, so a ring of 150
+//! needs ~44,000. Windows managed about 74 new loopback connections a second here (measured),
+//! so a big ring spent minutes connecting and handshakes timed out — the OS, not the protocol,
+//! was being tested. Addresses are still loopback addresses (127.x.y.z:port), given out by the
+//! network; no OS socket is opened.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
@@ -20,8 +24,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+use tokio::sync::mpsc;
 
 use super::{AddressPolicy, BoxedConnection, Listener, Transport};
 use crate::protocol::NodeId;
@@ -35,12 +39,25 @@ pub struct SimNetwork {
     next_conn: AtomicU64,
 }
 
+/// Bytes a pipe holds before the writer waits for the reader, like a socket buffer.
+const PIPE_BYTES: usize = 256 * 1024;
+/// Connections waiting to be accepted, like a listen backlog.
+const BACKLOG: usize = 1024;
+/// Ports are given out from here upwards, one network-wide counter.
+const FIRST_PORT: u16 = 20_000;
+
 #[derive(Default)]
 struct NetState {
     rings: HashMap<NodeId, BTreeSet<String>>,
-    /// Which node listens where (filled when a node binds).
-    listeners: HashMap<SocketAddr, NodeId>,
+    /// Who listens where, and how to hand them a new connection.
+    listeners: HashMap<SocketAddr, ListenerEntry>,
     conns: HashMap<u64, OpenConn>,
+    next_port: u16,
+}
+
+struct ListenerEntry {
+    node: NodeId,
+    incoming: mpsc::Sender<(DuplexStream, SocketAddr)>,
 }
 
 struct OpenConn {
@@ -50,6 +67,20 @@ struct OpenConn {
 }
 
 impl NetState {
+    /// A port nobody on the network uses yet.
+    fn free_port(&mut self) -> io::Result<u16> {
+        for _ in 0..u16::MAX {
+            self.next_port = self.next_port.max(FIRST_PORT).checked_add(1).unwrap_or(FIRST_PORT);
+            if !self.listeners.keys().any(|a| a.port() == self.next_port) {
+                return Ok(self.next_port);
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "no free simulated port",
+        ))
+    }
+
     fn share_ring(&self, a: &NodeId, b: &NodeId) -> bool {
         match (self.rings.get(a), self.rings.get(b)) {
             (Some(a), Some(b)) => !a.is_disjoint(b),
@@ -101,7 +132,7 @@ impl SimNetwork {
     pub fn remove(&self, node: &NodeId) {
         let mut state = self.state.lock().unwrap();
         state.rings.remove(node);
-        state.listeners.retain(|_, owner| owner != node);
+        state.listeners.retain(|_, l| &l.node != node);
         state.cut_unreachable();
     }
 
@@ -162,29 +193,26 @@ impl Transport for SimTransport {
     fn dial(&self, addr: SocketAddr) -> BoxFuture<'_, io::Result<BoxedConnection>> {
         Box::pin(async move {
             self.check(&addr)?;
-            let target = {
-                let state = self.network.state.lock().unwrap();
-                state
-                    .listeners
-                    .get(&addr)
-                    .filter(|target| state.share_ring(&self.node, target))
-                    .cloned()
+            let found = {
+                let mut state = self.network.state.lock().unwrap();
+                match state.listeners.get(&addr) {
+                    Some(l) if state.share_ring(&self.node, &l.node) => {
+                        let (target, incoming) = (l.node.clone(), l.incoming.clone());
+                        Some((target, incoming, SocketAddr::new(self.ip, state.free_port()?)))
+                    }
+                    _ => None,
+                }
             };
-            let Some(target) = target else {
+            let Some((target, incoming, from)) = found else {
                 return Err(self.unreachable(addr).await);
             };
-            let socket = match addr {
-                SocketAddr::V4(_) => TcpSocket::new_v4()?,
-                SocketAddr::V6(_) => TcpSocket::new_v6()?,
-            };
-            socket.bind(SocketAddr::new(self.ip, 0))?;
-            let stream = tokio::time::timeout(self.connect_timeout, socket.connect(addr))
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("connect to {addr} timed out")))??;
-            stream.set_nodelay(true)?;
+            let (ours, theirs) = tokio::io::duplex(PIPE_BYTES);
+            incoming
+                .try_send((theirs, from))
+                .map_err(|_| io::Error::new(io::ErrorKind::ConnectionRefused, format!("{addr} is not accepting")))?;
             let (id, cut) = self.network.open(&self.node, &target);
             Ok(Box::new(SimStream {
-                inner: stream,
+                inner: ours,
                 cut,
                 id,
                 network: Arc::downgrade(&self.network),
@@ -195,31 +223,47 @@ impl Transport for SimTransport {
     fn bind(&self, addr: SocketAddr) -> BoxFuture<'_, io::Result<Box<dyn Listener>>> {
         Box::pin(async move {
             self.check(&addr)?;
-            let listener = TcpListener::bind(addr).await?;
-            let local_addr = listener.local_addr()?;
-            self.check(&local_addr)?;
-            self.network
-                .state
-                .lock()
-                .unwrap()
-                .listeners
-                .insert(local_addr, self.node.clone());
-            Ok(Box::new(SimListener { listener, local_addr }) as Box<dyn Listener>)
+            let mut state = self.network.state.lock().unwrap();
+            let port = if addr.port() == 0 {
+                state.free_port()?
+            } else {
+                addr.port()
+            };
+            let local_addr = SocketAddr::new(addr.ip(), port);
+            if state.listeners.contains_key(&local_addr) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("{local_addr} is in use"),
+                ));
+            }
+            let (incoming, accepted) = mpsc::channel(BACKLOG);
+            let entry = ListenerEntry {
+                node: self.node.clone(),
+                incoming,
+            };
+            state.listeners.insert(local_addr, entry);
+            Ok(Box::new(SimListener {
+                accepted,
+                local_addr,
+                network: Arc::downgrade(&self.network),
+            }) as Box<dyn Listener>)
         })
     }
 }
 
 struct SimListener {
-    listener: TcpListener,
+    accepted: mpsc::Receiver<(DuplexStream, SocketAddr)>,
     local_addr: SocketAddr,
+    network: Weak<SimNetwork>,
 }
 
 impl Listener for SimListener {
     fn accept(&mut self) -> BoxFuture<'_, io::Result<(BoxedConnection, SocketAddr)>> {
         Box::pin(async move {
-            let (stream, peer) = self.listener.accept().await?;
-            stream.set_nodelay(true)?;
-            Ok((Box::new(stream) as BoxedConnection, peer))
+            match self.accepted.recv().await {
+                Some((stream, from)) => Ok((Box::new(stream) as BoxedConnection, from)),
+                None => Err(io::Error::new(io::ErrorKind::NotConnected, "listener closed")),
+            }
         })
     }
 
@@ -228,11 +272,20 @@ impl Listener for SimListener {
     }
 }
 
+impl Drop for SimListener {
+    /// Frees the address: later dials to it are refused, as with a closed port.
+    fn drop(&mut self) {
+        if let Some(network) = self.network.upgrade() {
+            network.state.lock().unwrap().listeners.remove(&self.local_addr);
+        }
+    }
+}
+
 /// The dialling end of a connection. Once cut it swallows writes and never completes a read,
 /// so neither end receives anything more. Every connection is dialled through some node's
 /// transport, so silencing this end silences the pair.
 struct SimStream {
-    inner: TcpStream,
+    inner: DuplexStream,
     cut: Arc<AtomicBool>,
     id: u64,
     network: Weak<SimNetwork>,

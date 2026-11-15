@@ -191,10 +191,10 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                 // Write what is already queued (e.g. the error frame saying why), then stop.
                 let _ = tokio::time::timeout(FLUSH_ON_CLOSE, async {
                     while let Ok(frame) = rx.try_recv() {
+                        tracer.sent(&peer, Channel::Inbound, &frame);
                         if sealer.write_frame(&mut writer, &frame).await.is_err() {
                             break;
                         }
-                        tracer.sent(&peer, Channel::Inbound, &frame);
                     }
                 })
                 .await;
@@ -202,10 +202,11 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             }
         };
         let Some(frame) = frame else { return };
+        // Reported before writing: the peer may answer (and report that) before this write returns.
+        tracer.sent(&peer, Channel::Inbound, &frame);
         if sealer.write_frame(&mut writer, &frame).await.is_err() {
             closed.cancel();
             return;
         }
-        tracer.sent(&peer, Channel::Inbound, &frame);
     }
 }

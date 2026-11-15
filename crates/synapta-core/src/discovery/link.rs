@@ -27,7 +27,7 @@ use super::handshake::{self, HandshakeParams, Session};
 use crate::config::ms;
 use crate::error::{ErrorBody, ErrorCode};
 use crate::node::state::NodeState;
-use crate::protocol::message::{Frame, Notification, Request, RequestFrame, ResponseFrame, SignedAdvert};
+use crate::protocol::message::{Frame, Notification, Request, RequestFrame, ResponseFrame, SyncAdvertsResult};
 use crate::protocol::NodeId;
 use crate::registry::PeerState;
 use crate::trace::{Channel, Tracer};
@@ -176,9 +176,13 @@ pub(crate) enum DialTarget {
     Learned(NodeId),
 }
 
-/// Starts a dialer for `addr` unless the address is not allowed. If one is already running, it
-/// is told to retry now rather than sit out its current wait.
-pub(crate) fn ensure_dialing(state: &Arc<NodeState>, addr: SocketAddr, target: DialTarget) {
+/// Starts a dialer for `addr` unless the address is not allowed. If one is already running and
+/// `hurry` is set, it is told to retry now rather than sit out its current wait.
+///
+/// Hurry only for news (a seed added, an address changed). It used to hurry on every advert, so
+/// a node kept redialling everyone in rings it cannot reach each time any advert arrived —
+/// thousands of useless dials a second in a lab of a few hundred nodes.
+pub(crate) fn ensure_dialing(state: &Arc<NodeState>, addr: SocketAddr, target: DialTarget, hurry: bool) {
     if state.shutdown.is_cancelled() || addr == state.listen_addr || state.policy.check(&addr).is_err() {
         return;
     }
@@ -186,7 +190,9 @@ pub(crate) fn ensure_dialing(state: &Arc<NodeState>, addr: SocketAddr, target: D
     {
         let mut dialers = state.dialers.lock().unwrap();
         if let Some(running) = dialers.get(&addr) {
-            running.notify_one();
+            if hurry {
+                running.notify_one();
+            }
             return;
         }
         dialers.insert(addr, retry_now.clone());
@@ -374,11 +380,12 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             frame = rx.recv() => frame,
         };
         let Some(frame) = frame else { return };
+        // Reported before writing: the peer may answer (and report that) before this write returns.
+        tracer.sent(link.peer(), Channel::Outbound, &frame);
         if let Err(e) = sealer.write_frame(&mut writer, &frame).await {
             link.close(format!("write failed: {e}"));
             return;
         }
-        tracer.sent(link.peer(), Channel::Outbound, &frame);
     }
 }
 
@@ -397,10 +404,12 @@ async fn heartbeat_loop(state: Arc<NodeState>, link: LinkHandle) {
     }
 }
 
-/// First exchange on a new link: send everything we know, learn everything the peer knows.
+/// First exchange on a new link: swap advert versions, take the adverts we lack, send the ones
+/// the peer lacks.
 async fn sync_adverts(state: Arc<NodeState>, link: LinkHandle) {
-    let adverts = flooding::all_known_adverts(&state);
-    let request = Request::SyncAdverts { adverts };
+    let request = Request::SyncAdverts {
+        known: flooding::known_versions(&state),
+    };
     match link.call(request, ms(state.config.timeouts.request_ms)).await {
         Ok(value) => match serde_json::from_value::<SyncAdvertsResult>(value) {
             Ok(result) => {
@@ -409,16 +418,16 @@ async fn sync_adverts(state: Arc<NodeState>, link: LinkHandle) {
                         tracing::warn!(peer = %link.peer(), error = %e, "advert from sync rejected");
                     }
                 }
+                for node in &result.want {
+                    if let Some(signed) = flooding::signed_advert(&state, node) {
+                        link.notify(Notification::Advert(signed));
+                    }
+                }
             }
             Err(e) => tracing::warn!(peer = %link.peer(), error = %e, "malformed adverts.sync response"),
         },
         Err(e) => tracing::warn!(peer = %link.peer(), error = %e, "adverts.sync failed"),
     }
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct SyncAdvertsResult {
-    pub adverts: Vec<SignedAdvert>,
 }
 
 fn set_peer_state(state: &NodeState, id: &NodeId, peer_state: PeerState, error: Option<String>) {

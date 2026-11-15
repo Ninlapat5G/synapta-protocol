@@ -15,10 +15,10 @@ use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use synapta_core::config::ms;
 use synapta_core::identity::{generate_keypair, issue_card, random_bytes, to_hex, unix_now, CardClaims};
-use synapta_core::protocol::message::Availability;
+use synapta_core::protocol::message::{Availability, ResourceState};
 use synapta_core::protocol::NodeType;
 use synapta_core::transport::sim::SimNetwork;
-use synapta_core::{NodeConfig, NodeHandle, NodeId, NodeStatus, StartOptions};
+use synapta_core::{NodeConfig, NodeHandle, NodeId, StartOptions};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
@@ -32,6 +32,10 @@ const SEEDS_PER_NODE: usize = 3;
 const TRACE_CAPACITY: usize = 200_000;
 /// How long a card stays valid. The lab lives for one session; a year is "never" here.
 const CARD_LIFETIME_S: u64 = 365 * 24 * 3600;
+/// Inbound connections a lab node accepts. Everyone in a ring connects to everyone, so a ring
+/// of N needs N-1 per node; the node default (64) stops rings at 65. Lab connections are
+/// in-memory pipes, so a high limit costs nothing.
+const MAX_INBOUND: usize = 10_000;
 
 /// Everything the web page can set on a node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +57,23 @@ pub struct NodeSetup {
     pub availability: Availability,
     #[serde(default)]
     pub rings: Vec<String>,
+}
+
+impl NodeSetup {
+    /// A node with the same defaults a JSON setup with only an id gets.
+    pub fn new(id: NodeId) -> Self {
+        Self {
+            id,
+            name: String::new(),
+            node_type: server(),
+            capabilities: Vec::new(),
+            max_concurrent_jobs: four(),
+            cpu_percent: 0,
+            memory_mb: memory(),
+            availability: available(),
+            rings: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,13 +109,20 @@ pub enum PowerOff {
     Crash,
 }
 
+/// What the map draws for one node. Light on purpose (no peer adverts): the page asks for all
+/// nodes every second. The full status is `Lab::node(id)?.status()`.
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeView {
     pub setup: NodeSetup,
-    pub address: Option<SocketAddr>,
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<NodeStatus>,
+    pub address: Option<SocketAddr>,
+    /// Nodes it has a READY link to.
+    pub links: Vec<NodeId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceState>,
+    /// Jobs it has run since it last started.
+    pub jobs_run: u64,
 }
 
 struct LabNode {
@@ -245,23 +273,59 @@ impl Lab {
         let nodes = self.nodes.lock().await;
         nodes
             .values()
-            .map(|n| NodeView {
-                setup: n.setup.clone(),
-                address: n.handle.as_ref().map(NodeHandle::listen_addr),
-                running: n.handle.is_some(),
-                status: n.handle.as_ref().map(NodeHandle::status),
+            .map(|n| {
+                let advert = n.handle.as_ref().map(NodeHandle::advert);
+                NodeView {
+                    setup: n.setup.clone(),
+                    running: n.handle.is_some(),
+                    address: n.handle.as_ref().map(NodeHandle::listen_addr),
+                    links: advert.as_ref().map(|a| a.neighbors.clone()).unwrap_or_default(),
+                    resources: advert.map(|a| a.resources),
+                    jobs_run: n.handle.as_ref().map_or(0, |h| h.executions().values().sum()),
+                }
             })
             .collect()
     }
 
-    /// Stops every node.
-    pub async fn shutdown(&self) {
-        let mut nodes = self.nodes.lock().await;
-        for node in nodes.values_mut() {
-            if let Some(handle) = node.handle.take() {
-                handle.shutdown().await;
+    /// Every node's setup, in id order: what a saved topology holds.
+    pub async fn setups(&self) -> Vec<NodeSetup> {
+        self.nodes.lock().await.values().map(|n| n.setup.clone()).collect()
+    }
+
+    /// Removes every node and forgets the recorded trace. Nodes stop in parallel: one by one,
+    /// a few hundred would take minutes.
+    pub async fn reset(&self) {
+        let removed: Vec<LabNode> = std::mem::take(&mut *self.nodes.lock().await).into_values().collect();
+        let mut stopping = tokio::task::JoinSet::new();
+        for node in removed {
+            self.network.remove(&node.setup.id);
+            if let Some(handle) = node.handle {
+                stopping.spawn(async move { handle.shutdown().await });
             }
         }
+        stopping.join_all().await;
+        self.recorder.clear();
+    }
+
+    /// Replaces everything with these nodes. Stops at the first node that cannot be added and
+    /// says which; the nodes before it stay.
+    pub async fn load(&self, setups: Vec<NodeSetup>) -> Result<(), String> {
+        self.reset().await;
+        for setup in setups {
+            let id = setup.id.clone();
+            self.add_node(setup).await.map_err(|e| format!("{id}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Stops every node, in parallel.
+    pub async fn shutdown(&self) {
+        let mut nodes = self.nodes.lock().await;
+        let mut stopping = tokio::task::JoinSet::new();
+        for handle in nodes.values_mut().filter_map(|n| n.handle.take()) {
+            stopping.spawn(async move { handle.shutdown().await });
+        }
+        stopping.join_all().await;
     }
 
     fn write_identity(&self, id: &NodeId, dir: &std::path::Path) -> Result<(), String> {
@@ -333,6 +397,9 @@ cpu_percent = {cpu}
 memory_available_mb = {memory}
 max_concurrent_jobs = {max}
 availability = {availability}
+
+[limits]
+max_inbound_connections = {MAX_INBOUND}
 
 [[trust_authority]]
 network = "{NETWORK}"

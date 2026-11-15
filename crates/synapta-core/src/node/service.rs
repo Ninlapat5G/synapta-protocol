@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 
 use crate::config::ms;
 use crate::discovery::flooding;
-use crate::discovery::link::SyncAdvertsResult;
 use crate::error::{ErrorBody, ErrorCode};
 use crate::execution::EventSink;
 use crate::node::state::NodeState;
@@ -27,16 +26,7 @@ pub(crate) async fn handle_request(
     let request_timeout = ms(state.config.timeouts.request_ms);
     match request {
         Request::Ping => Ok(pong()),
-        Request::SyncAdverts { adverts } => {
-            for signed in adverts {
-                if let Err(e) = flooding::accept_advert(state, signed, Some(caller)) {
-                    tracing::warn!(peer = %caller, error = %e, "advert from sync rejected");
-                }
-            }
-            to_value(SyncAdvertsResult {
-                adverts: flooding::all_known_adverts(state),
-            })
-        }
+        Request::SyncAdverts { known } => to_value(flooding::answer_sync(state, &known)),
         Request::Invoke { capability, input } => {
             let executor = state.authorize(caller, &capability)?;
             let (job_id, output) = state.jobs.run(caller.clone(), executor, input, request_timeout).await?;

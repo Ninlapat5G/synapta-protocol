@@ -28,6 +28,7 @@ use crate::protocol::message::{CapabilityAdvert, Event, InvokeResult, JobInfo, J
 use crate::protocol::{NodeId, WireRange, SOFTWARE_VERSION};
 use crate::registry::{PeerState, PeerView};
 use crate::routing::dispatch::{self, decode, PeerPath, RouteFailure, Routed};
+use crate::routing::paths::{self, Route};
 use crate::routing::RoutingDecision;
 use crate::trace::{TraceSink, Tracer};
 use crate::transport::tcp::TcpTransport;
@@ -113,7 +114,7 @@ pub async fn start_with(config: NodeConfig, options: StartOptions) -> Result<Nod
     state.tasks.spawn(flooding::run_publisher(state.clone()));
     state.tasks.spawn(run_job_sweeper(state.clone()));
     for seed in seeds {
-        ensure_dialing(&state, seed, DialTarget::Seed);
+        ensure_dialing(&state, seed, DialTarget::Seed, true);
     }
     tracing::info!(node = %state.node_id(), listen = %listen_addr, "node started");
     Ok(NodeHandle { state })
@@ -232,18 +233,29 @@ impl NodeHandle {
         &self.state.config
     }
 
+    /// This node's advert as it would go out now: capabilities, resources, READY neighbours.
+    /// Much cheaper than [`Self::status`], which copies every peer's advert.
+    pub fn advert(&self) -> NodeAdvert {
+        let seq = self.state.own_advert.lock().unwrap().seq;
+        self.state.advert_now(seq)
+    }
+
     pub fn status(&self) -> NodeStatus {
         // Built before taking the registry lock: the advert reads the registry itself.
-        let seq = self.state.own_advert.lock().unwrap().seq;
-        let node = self.state.advert_now(seq);
+        let node = self.advert();
         let registry = self.state.registry.read().unwrap();
         NodeStatus {
             node,
             listen: self.state.listen_addr,
             peers: registry.views(Instant::now()),
-            executions: self.state.jobs.executions(),
+            executions: self.executions(),
             retained_jobs: self.state.jobs.retained_count(),
         }
+    }
+
+    /// Jobs started on this node per capability since start.
+    pub fn executions(&self) -> BTreeMap<String, u64> {
+        self.state.jobs.executions()
     }
 
     /// Dry run: what routing would decide right now, without executing anything.
@@ -301,6 +313,11 @@ impl NodeHandle {
         self.state.job_events.events(node, job_id)
     }
 
+    /// How this node reaches every node it knows a path to right now (direct or relayed).
+    pub fn routes(&self) -> BTreeMap<NodeId, Route> {
+        paths::current(&self.state)
+    }
+
     pub fn recent_decisions(&self) -> Vec<RoutingDecision> {
         self.state.routing_log.lock().unwrap().iter().cloned().collect()
     }
@@ -330,7 +347,7 @@ impl NodeHandle {
     /// Adds `addr` as a seed while running: dialled now and retried like a configured seed.
     /// For an operator (or synapta-lab) that puts this node on a new network.
     pub fn connect_to(&self, addr: SocketAddr) {
-        ensure_dialing(&self.state, addr, DialTarget::Seed);
+        ensure_dialing(&self.state, addr, DialTarget::Seed, true);
     }
 
     /// Resolves when shutdown has been requested (by [`Self::request_shutdown`] or a signal handler).

@@ -158,14 +158,41 @@ HTML + JS ธรรมดา ฝังในโปรแกรม ไม่ต�
 | M1 ประตูเครือข่าย + trace | เสร็จ | a2c4711 |
 | M2 บัตรสมาชิก | เสร็จ | 21c44c9 |
 | M3 relay + routing ข้ามวง (wire 4) | เสร็จ | 34b70a5 |
-| M4 synapta-lab backend | ครึ่งแรกเสร็จ: `Lab` (เพิ่ม/ลบ/เปิด/ปิด/ดับ node, ย้ายวงสด, แก้ค่าแล้ว restart) + `Recorder` | ดู git log |
-| M5 หน้าเว็บ | ยังไม่เริ่ม | |
-| M6 สถานการณ์สำเร็จรูป + วัดขนาด + เอกสาร | ยังไม่เริ่ม | |
+| M4 synapta-lab backend | เสร็จ: `Lab` + `Recorder` + binary `synapta-lab` + HTTP API (`api.rs`) + server แยก (`http.rs`) | ดู git log |
+| M5 หน้าเว็บ | เสร็จรอบแรก: แผนที่ SVG (ลาก/ซูม/pinch), Cable/Cut, node panel, Call + routing table, jobs, replay ทีละก้าว, บันทึก/โหลดผัง, จอมือถือ — ตรวจด้วย Edge headless (CDP) แล้ว | ดู git log |
+| M6 สถานการณ์สำเร็จรูป + วัดขนาด + เอกสาร | กำลังทำ: มี 4 สถานการณ์ (`scenarios.rs`), กำลังแก้ให้ผังใหญ่ไหว | |
 
-M4 ที่เหลือ: binary `synapta-lab` (หา IP Tailscale ช่วง 100.64.0.0/10 หรือ `--listen`, ห้าม 0.0.0.0) + HTTP API ของ lab
-(JSON: nodes CRUD, power, rings, invoke/submit/job, explain, `GET /trace?after=`, save/load ผัง) + ส่งไฟล์หน้าเว็บ
-· HTTP server ของ gateway (`synapta-gateway/src/http.rs`) บังคับ token + Host loopback + ตอบ JSON อย่างเดียว ใช้ตรง ๆ ไม่ได้:
-ต้องตัดสินใจระหว่างขยายให้ปิด token/อนุญาต host Tailscale/ส่ง HTML ได้ หรือ server แยกใน lab
+ตัดสินใจระหว่างทาง (M4–M6):
+- **HTTP server แยกใน lab** ไม่แก้ของ gateway — gateway ต้องเข้ม (token + Host loopback) เพราะคุม node จริง
+  lab ไม่มี login ตามที่ตกลง เหลือกันอย่างเดียว: คำขอที่เปลี่ยนอะไรต้องเป็น `application/json` (กันเว็บอื่นในเบราว์เซอร์เดียวกันสั่ง lab)
+- หา IP Tailscale ด้วย `tailscale ip -4` (ไม่ใช้ท่า UDP connect เพราะต้อง bind 0.0.0.0 ชั่วขณะ)
+- **ตัวจำลองเครือข่ายเปลี่ยนจาก TCP loopback เป็นท่อในหน่วยความจำ** (`tokio::io::duplex`): วัดได้ว่า Windows
+  เปิด connection loopback ได้ราว 74 ครั้ง/วินาที วง 150 ตัวต้องใช้ ~44,000 connection — ทดสอบ OS ไม่ใช่ protocol
+  handshake/เข้ารหัส/framing ยังเป็นของจริงทั้งหมด
+- binary ของ lab ใช้ **mimalloc** — heap ปกติของ Windows ล็อกชนกันจนวง 100 ตัวต่อไม่ติด (วัดแล้ว: ใส่ mimalloc ต่อครบใน ~1 วินาที)
+
+แก้ใน protocol ที่ผังใหญ่เผยออกมา (ยังเป็น wire 4 เพราะยังไม่ออกรุ่น):
+1. `adverts.sync` ส่งรายการเวอร์ชัน แล้วส่งเฉพาะ advert ที่อีกฝั่งขาด (เดิมส่งทั้งฐานข้อมูลทุกครั้งที่ลิงก์ขึ้น)
+2. ไม่ flood advert ซ้ำไปหาเพื่อนบ้านของต้นทางและของคนที่ส่งต่อมา (เดิม 1 advert กลายเป็น ~N² ข้อความในวงที่ทุกตัวต่อกันหมด)
+3. advert ที่ไม่ใหม่กว่าที่มี ทิ้งก่อนตรวจลายเซ็น (ปลอดภัย: ตัวปลอมที่อ้างว่าใหม่กว่ายังโดนตรวจ)
+4. ช่วงพักระหว่าง advert ยาวขึ้นตามจำนวนลิงก์ (`advert_min_interval_ms` ต่อ 10 ลิงก์)
+5. advert ที่มาซ้ำไม่เร่ง dialer อีก — เร่งเฉพาะเมื่อที่อยู่เปลี่ยน
+6. trace รายงาน "ส่ง" ก่อนเขียน (เดิมฝั่งรับตอบกลับก่อนฝั่งส่งรายงาน ทำให้ลำดับในบันทึกกลับหัว)
+
+ผลวัด (เครื่องนี้ 16 core, release, ทุก node ใน process เดียว):
+| ผัง | ผล |
+|---|---|
+| วงเดียว 30 ตัว | ต่อครบ 0.5 วินาที (ก่อนแก้: ต่อไม่ครบเลย) |
+| วงเดียว 60 ตัว | ต่อครบ 0.9 วินาที |
+| วงเดียว 100 ตัว | ต่อครบ ~1 วินาที (ต้องตั้ง `max_inbound_connections` > 99 — ค่าเริ่มต้น 64 ทำให้วงเกิน 65 ตัวต่อครบไม่ได้, lab ตั้ง 10,000) |
+| วงเดียว 150 ตัว | **ยังไม่ผ่าน** — คิวงาน runtime ค้างหมื่นกว่า ลิงก์ลดลงเรื่อย ๆ |
+| 5 วง × 100 = 500 ตัว | **ยังไม่ผ่าน** — สาเหตุที่เห็น: แต่ละ node หมุน dial ไปหา ~400 ตัวในวงอื่นที่ไม่มีทางต่อตรง (30 ครั้งต่อตัว แล้วเริ่มใหม่ทุก advert refresh 5 วินาที) |
+
+งานถัดไป (หลัง compact):
+- กฎ redial: เลิกพยายามที่อยู่ไหนแล้ว ลองใหม่เมื่อ node นั้น restart (incarnation เปลี่ยน) หรือย้ายที่อยู่เท่านั้น ไม่ใช่ทุก refresh
+  แล้ววัด 500 ตัวกับวงเดียว 150 ตัวอีกรอบ (ตัว probe อยู่ใน scratchpad: `probe.rs`, `scale.py`)
+- เอกสาร protocol/routing/architecture/roadmap/test-report/README ตามรายการข้างล่าง + ข้อจำกัด `max_inbound_connections`
+  + version 0.0.4 + `synapta-sandbox` ต้องยังผ่าน + zip `D:\claude_code\exe\SynaptaProtocol-v0.0.4.zip`
 
 เอกสารที่ต้องอัปเดตใน M6 (ยังไม่ได้แก้ตาม M1–M3): `docs/protocol.md` (wire 4, `relay`, `neighbors`,
 บัตรสมาชิกใน hello/advert, error `unreachable`/`ttl_exceeded`), `docs/routing.md` (hops ในลำดับคะแนน,
