@@ -327,6 +327,12 @@ impl NodeHandle {
         tokio::time::timeout(timeout, wait).await.is_ok() && condition(&self.status())
     }
 
+    /// Adds `addr` as a seed while running: dialled now and retried like a configured seed.
+    /// For an operator (or synapta-lab) that puts this node on a new network.
+    pub fn connect_to(&self, addr: SocketAddr) {
+        ensure_dialing(&self.state, addr, DialTarget::Seed);
+    }
+
     /// Resolves when shutdown has been requested (by [`Self::request_shutdown`] or a signal handler).
     pub fn shutdown_requested(&self) -> impl Future<Output = ()> + Send + 'static {
         self.state.shutdown.clone().cancelled_owned()

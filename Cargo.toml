@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/synapta-core", "crates/synapta-gateway", "crates/synapta-node"]
+members = ["crates/synapta-core", "crates/synapta-gateway", "crates/synapta-lab", "crates/synapta-node"]
 
 [workspace.package]
 version = "0.0.3"

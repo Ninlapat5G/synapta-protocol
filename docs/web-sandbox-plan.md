@@ -157,10 +157,15 @@ HTML + JS ธรรมดา ฝังในโปรแกรม ไม่ต�
 |---|---|---|
 | M1 ประตูเครือข่าย + trace | เสร็จ | a2c4711 |
 | M2 บัตรสมาชิก | เสร็จ | 21c44c9 |
-| M3 relay + routing ข้ามวง (wire 4) | เสร็จ | ดู git log |
-| M4 synapta-lab backend | ยังไม่เริ่ม | |
+| M3 relay + routing ข้ามวง (wire 4) | เสร็จ | 34b70a5 |
+| M4 synapta-lab backend | ครึ่งแรกเสร็จ: `Lab` (เพิ่ม/ลบ/เปิด/ปิด/ดับ node, ย้ายวงสด, แก้ค่าแล้ว restart) + `Recorder` | ดู git log |
 | M5 หน้าเว็บ | ยังไม่เริ่ม | |
 | M6 สถานการณ์สำเร็จรูป + วัดขนาด + เอกสาร | ยังไม่เริ่ม | |
+
+M4 ที่เหลือ: binary `synapta-lab` (หา IP Tailscale ช่วง 100.64.0.0/10 หรือ `--listen`, ห้าม 0.0.0.0) + HTTP API ของ lab
+(JSON: nodes CRUD, power, rings, invoke/submit/job, explain, `GET /trace?after=`, save/load ผัง) + ส่งไฟล์หน้าเว็บ
+· HTTP server ของ gateway (`synapta-gateway/src/http.rs`) บังคับ token + Host loopback + ตอบ JSON อย่างเดียว ใช้ตรง ๆ ไม่ได้:
+ต้องตัดสินใจระหว่างขยายให้ปิด token/อนุญาต host Tailscale/ส่ง HTML ได้ หรือ server แยกใน lab
 
 เอกสารที่ต้องอัปเดตใน M6 (ยังไม่ได้แก้ตาม M1–M3): `docs/protocol.md` (wire 4, `relay`, `neighbors`,
 บัตรสมาชิกใน hello/advert, error `unreachable`/`ttl_exceeded`), `docs/routing.md` (hops ในลำดับคะแนน,
