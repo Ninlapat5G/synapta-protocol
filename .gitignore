@@ -5,3 +5,10 @@ examples/sandbox/data/
 
 # Python venv for the official UTCP SDK test (see README)
 .venv-utcp/
+
+# Synapta Lab runtime files written next to synapta-lab.exe by Lab-Control.ps1
+lab-saved/
+lab.pid
+lab.port
+lab.log
+lab.err

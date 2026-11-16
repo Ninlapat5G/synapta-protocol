@@ -23,6 +23,9 @@ Protocol ให้ node หลายเครื่องค้นพบกั�
 หรือ `http://<IP Tailscale ของเครื่องนี้>:7878/` จากมือถือ เว็บฟังเฉพาะ loopback และ IP Tailscale ของเครื่องนี้
 ไม่มี login ตามขอบเขตตัวจำลองที่ตกลงไว้ ปิดหน้าต่างโปรแกรมเพื่อหยุด
 
+เปิดแบบไม่มีหน้าต่าง: `Start-Lab-Hidden.cmd` · ปิด: `Stop-Lab.cmd` (บันทึกผังลง `lab-saved\` ให้ก่อนปิด)
+agent สั่งงานผ่าน HTTP ได้ — ดู [`docs/agent-guide.md`](docs/agent-guide.md)
+
 หน้า Scenarios สร้างวงเครือข่ายได้ หน้า Call ส่งงาน เลือกปลายทาง และดูเหตุผลของ routing
 ดู trace แบบสดหรือเล่นย้อนหลัง ตัดสาย ดับ node และบันทึก/โหลดผังได้
 ต้อง Save ผังก่อนปิด: node และ trace ไม่คงอยู่หลังปิดโปรแกรม การเล่นย้อน trace ไม่หยุดเวลาของ node
@@ -99,6 +102,7 @@ docs/                เอกสาร (ดูด้านล่าง)
 - [`docs/utcp-integration.md`](docs/utcp-integration.md) — UTCP adapter และผลทดสอบกับ SDK ทางการ
 - [`docs/spec-review.md`](docs/spec-review.md) — ช่องโหว่ที่พบใน spec ต้นทาง และวิธีปิด
 - [`docs/test-report.md`](docs/test-report.md) — ผลทดสอบพร้อมหลักฐาน
+- [`docs/agent-guide.md`](docs/agent-guide.md) — คู่มือให้ agent เปิด/ปิดและสั่ง Synapta Lab ผ่าน HTTP
 - [`docs/roadmap.md`](docs/roadmap.md) — ข้อจำกัดที่รู้แล้ว และแผนถัดไป
 
 ## ความปลอดภัย (v0.0.4)
