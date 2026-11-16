@@ -31,7 +31,7 @@
 - ทั้งสองชั้น: `length` = 0 → malformed · ขนาด frame รวม > `limits.max_frame_bytes` (ค่าเริ่ม 1 MiB) → `frame_too_large`
   ตรวจก่อนจองหน่วยความจำ (ชั้นเข้ารหัสตรวจทุก record ที่สะสม)
 - **ระหว่าง handshake** ทุก frame (ทั้งในที่แจ้งและเข้ารหัส) จำกัดที่ 4 KiB ไม่ว่า config จะตั้งเท่าไร —
-  ข้อความ handshake จริงเล็กกว่า 1 KiB และผู้ที่ยังไม่ได้ยืนยันตัวตนไม่ควรทำให้ node จองหน่วยความจำ 1 MiB ต่อ connection ได้
+  บัตรสมาชิกนับรวมในเพดานนี้ ผู้ที่ยังไม่ได้ยืนยันตัวตนไม่ควรทำให้ node จองหน่วยความจำ 1 MiB ต่อ connection ได้
 - frame ผิดรูป/ใหญ่เกิน: ฝั่งรับส่ง `Frame::Error` (เข้ารหัสถ้าอยู่ในชั้น 2) แล้วปิด connection — process ไม่ล้ม
 
 ## ลำดับบน connection
@@ -73,7 +73,7 @@ synapta-handshake\n<role>\nwire <wire_version>\ndialer <dialer_id> <min> <max>\n
 ```
 
 - `hello_proof.signature` = acceptor เซ็น role `acceptor` · `hello_finish.signature` = dialer เซ็น role `dialer`
-- ตรวจ: มี wire version ร่วมกัน · node id อยู่ใน trust list · ลายเซ็นผ่านด้วย key ของ id นั้น (`verify_strict`) ·
+- ตรวจ: มี wire version ร่วมกัน · node id อยู่ใน trust list หรือมีบัตรจาก authority ที่เชื่อถือ · ลายเซ็นผ่านด้วย key ของ id นั้น (`verify_strict`) ·
   ไม่ใช่ตัวเอง · ถ้า dialer รู้ว่าที่ address นั้นควรเป็นใคร (จาก advert) ต้องตรง
 - **ทำไมกันคนกลางได้:** คนกลางที่อยากอ่านข้อความต้องเปิด Noise session แยกกับแต่ละฝั่ง → สอง session ได้ `h` ต่างกัน
   ลายเซ็นที่ฝั่งจริงเซ็นจึงใช้กับอีก session ไม่ได้ (มีเทสต์ `relaying_man_in_the_middle_is_refused`)
@@ -84,7 +84,7 @@ synapta-handshake\n<role>\nwire <wire_version>\ndialer <dialer_id> <min> <max>\n
 
 **ที่ยังเห็นในที่แจ้ง:** ช่วง wire version, node id ทั้งสองฝั่ง, public key ชั่วคราว — นอกนั้นเข้ารหัสหมด รวมถึง error
 
-**กับ node v0.0.1 / v0.0.2:** ต่อกันไม่ได้ (wire version 1 / 2) — hello แบบเก่ายังอ่านออก (ไม่มี `wire` อ่านเป็น `{0,0}`)
+**กับ node v0.0.1 / v0.0.2 / v0.0.3:** ต่อกันไม่ได้ (wire version 1 / 2 / 3) — hello แบบเก่ายังอ่านออก (ไม่มี `wire` อ่านเป็น `{0,0}`)
 และได้ `version_mismatch` พร้อมข้อความ "older than v0.0.3" ไม่ใช่ malformed
 
 ## Version และความเข้ากันได้
@@ -93,7 +93,7 @@ synapta-handshake\n<role>\nwire <wire_version>\ndialer <dialer_id> <min> <max>\n
 
 - **wire version** คือตัวเลขเดียวที่บอกว่าสอง node คุยกันได้หรือไม่ ขึ้นเลขเฉพาะเมื่อสิ่งที่ส่งบนสายเปลี่ยนแบบเข้ากันไม่ได้
   release ที่ไม่แตะรูปแบบข้อความไม่ต้องขึ้นเลข จึงคุยกับ node รุ่นก่อนได้ · 1 = v0.0.1, 2 = v0.0.2, 3 = v0.0.3, **4 = v0.0.4**
-- **software version** (เลข release เช่น `0.0.3`) อยู่ใน advert และ `system.info` ให้คนอ่าน ไม่ใช้ตัดสินอะไร
+- **software version** (เลข release เช่น `0.0.4`) อยู่ใน advert และ `system.info` ให้คนอ่าน ไม่ใช้ตัดสินอะไร
 - **เพิ่มได้โดยไม่ขึ้นเลข** (ฝั่งรับที่เก่ากว่าไม่หลุด):
   - field ใหม่ในข้อความเดิม — ฝั่งรับไม่สนใจ field ที่ไม่รู้จัก
   - frame type, notification, event ใหม่ — ฝั่งรับข้าม
@@ -111,7 +111,7 @@ synapta-handshake\n<role>\nwire <wire_version>\ndialer <dialer_id> <min> <max>\n
 | method | params | result |
 |---|---|---|
 | `ping` | — | `{}` (ตอบทันที ไม่นับในเพดาน request ที่ค้าง) |
-| `adverts.sync` | `{adverts: [SignedAdvert]}` | `{adverts: [SignedAdvert]}` — ส่งทั้งหมดที่รู้ ได้ทั้งหมดที่อีกฝั่งรู้ |
+| `adverts.sync` | `{known: [{node_id, incarnation, seq}]}` | `{adverts: [SignedAdvert], want: [NodeId]}` — ส่งเฉพาะที่อีกฝั่งขาด แล้วส่ง advert ใน `want` กลับเป็น notification |
 | `invoke` | `{capability, input}` | `InvokeResult {executed_by, job_id, output}` |
 | `job.submit` | `{capability, input}` | `JobSubmitted {executed_by, job_id}` |
 | `job.status` | `{job_id}` | `JobInfo` |
@@ -153,7 +153,7 @@ best effort: คิวเต็มจะทิ้ง event แต่สถาน
 ```
 
 - ลายเซ็นครอบ `"synapta-advert\n" + payload` — เซ็น **string** ไม่ใช่ struct ที่ serialize ใหม่ จึงไม่ขึ้นกับรูปแบบ JSON
-- รับเฉพาะเมื่อ: เซ็นด้วย key ของ `node_id` ใน trust list · address ผ่าน `AddressPolicy` ·
+- รับเฉพาะเมื่อ: เซ็นด้วย key ของ `node_id` ใน trust list หรือ key ที่รับจากบัตรสมาชิก · address ผ่าน `AddressPolicy` ·
   `(incarnation, seq)` ใหม่กว่าที่มี (ช่วง `wire` ไม่ใช่เงื่อนไข — ใช้ตัดสินแค่ว่าจะ dial หรือไม่)
 - advert ของตัวเองที่วนกลับมา ทิ้งก่อนตรวจ
 
@@ -179,24 +179,24 @@ best effort: คิวเต็มจะทิ้ง event แต่สถาน
 | `unsupported_request` | ฝั่งรับไม่รู้จัก method นี้ (รุ่นเก่ากว่า) — รับประกันว่ายังไม่ได้รัน | 501 |
 | `unknown` | code ที่ build นี้ไม่รู้จัก (ส่งมาจาก node รุ่นใหม่กว่า) — build นี้ไม่ส่งเอง | 500 |
 
-## ????????????? relay (wire 4)
+## บัตรสมาชิกและ relay (wire 4)
 
-`card` ?? hello/hello_ack ??? SignedAdvert ???? `{payload, signature}`
-claims ?? payload ??? `{network, node_id, public_key, issued_at, expires_at}` ????????? `synapta-card\n`
-???????? authority ?? `[[trust_authority]]` ??? network ????????????????????
-node ???????????????? private key ?? handshake ????????; ???????????????????? allow list
-`identity.card_file` ?????????? node ??? ?????????????????????????????????
+`card` ใน hello/hello_ack และ SignedAdvert เป็น `{payload, signature}`
+claims ใน payload คือ `{network, node_id, public_key, issued_at, expires_at}` เซ็นโดเมน `synapta-card\n`
+ต้องผ่าน authority ใน `[[trust_authority]]` ของ network นั้นและยังไม่หมดอายุ
+node ยังพิสูจน์การถือ private key ใน handshake; บัตรไม่ใช่สิทธิ์ข้าม allow list
+`identity.card_file` ชี้บัตรของ node เอง ยังไม่มีการเพิกถอนบัตรก่อนหมดอายุ
 
-`NodeAdvert.neighbors` ???? READY link ???????????????????????????? node ????????????
+`NodeAdvert.neighbors` ระบุ READY link เส้นทางใช้ขอบที่ทั้งสอง node ยืนยันตรงกัน
 `relay` params = `{to, ttl, envelope: {payload, signature}}`
-Envelope = `{from, to, nonce, expires_at_ms, request}` ???????????????????????????? `synapta-relay-envelope\n`
-???????????? SignedPayload ??? RelayReply `{from, to, nonce, result?, error?}`
-???????????????????? `synapta-relay-reply\n` ??????????????? id/nonce ?????????
-??????????? payload ???: ???????????? link ?????? end-to-end encryption
+Envelope = `{from, to, nonce, expires_at_ms, request}` เซ็นโดยผู้เรียกเดิมด้วยโดเมน `synapta-relay-envelope\n`
+ผลเป็น SignedPayload ของ RelayReply `{from, to, nonce, result?, error?}`
+ปลายทางเซ็นด้วยโดเมน `synapta-relay-reply\n` และผู้เรียกตรวจ id/nonce ก่อนรับผล
+ตัวกลางอ่าน payload ได้: เข้ารหัสทีละ link ไม่ใช่ end-to-end encryption
 
-relay ????? 8 hop ???????????? nonce ?????????????????????? 65,536 ????????????????????
-`unreachable` ??? `ttl_exceeded` ???????????????????? ??????????????????????????????????
-???? timeout/connection_lost ???????????? ?????????????????
-???? allow ?????????????????? Envelope ?????? node ?????
-?????? invoke, job.submit/status/result/cancel; progress event ????????????? relay ?????? status/result ???
-??????????????????????????? envelope ?????????????
+relay จำกัด 8 hop และปลายทางจำ nonce ที่ยังไม่หมดอายุสูงสุด 65,536 รายการเพื่อกันรันซ้ำ
+`unreachable` และ `ttl_exceeded` หมายถึงปฏิเสธก่อนรัน จึงลองผู้สมัครถัดไปได้เฉพาะ routing อัตโนมัติ
+หลัง timeout/connection_lost ไม่ส่งงานซ้ำ เพราะอาจรันไปแล้ว
+ตรวจ allow ของผู้เรียกที่เซ็น Envelope ไม่ใช่ node สะพาน
+รองรับ invoke และ job.submit/status/result/cancel; progress event ยังไม่ส่งข้าม relay ให้ถาม status/result แทน
+นาฬิกาที่คลาดกันมีผลต่ออายุ envelope และบัตรสมาชิก

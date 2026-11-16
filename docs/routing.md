@@ -18,14 +18,14 @@
    | code | เงื่อนไข |
    |---|---|
    | `not_allowed` | `allow` ของ capability ไม่มีผู้เรียก (ตัวเองเรียกตัวเองได้เสมอ) |
-   | `link_not_ready` | link ตรงไปเครื่องนั้นไม่ `READY` |
+   | `link_not_ready` | ไม่มี link `READY` และไม่มีเส้นทางผ่าน relay |
    | `not_available` | `availability` ≠ `available` |
    | `at_capacity` | `active_jobs + unseen_jobs ≥ max_concurrent_jobs` |
 
 3. **จัดอันดับ** ผู้ผ่าน ด้วย key เดียว:
 
    ```
-   (load_permille ↑, cpu_percent ↑, last_dispatch ↑ (ไม่เคยส่ง = มาก่อน), node_id ↑)
+   (load_permille ↑, hops ↑, cpu_percent ↑, last_dispatch ↑ (ไม่เคยส่ง = มาก่อน), node_id ↑)
    load_permille = (active_jobs + unseen_jobs) × 1000 / max_concurrent_jobs   (จำนวนเต็ม — เทียบได้แน่นอน)
    ```
 
@@ -33,7 +33,7 @@
    - `last_dispatch` — ลำดับครั้งล่าสุดที่ผู้เรียกส่งงานไปเครื่องนั้น โหลดเท่ากันจะไปเครื่องที่ส่งไปนานที่สุด
      เครื่องว่างจึงสลับกันรับงาน แทนที่เครื่องชื่อขึ้นก่อนจะได้ไปทั้งหมด
    - `node_id` ไม่ซ้ำกัน ปิดท้ายให้ลำดับสมบูรณ์เสมอ (ใช้จริงเฉพาะตอนยังไม่เคยส่งไปทั้งสองเครื่อง)
-4. เลือกอันดับ 1 ส่งตรงไปเครื่องนั้น
+4. เลือกอันดับ 1 ส่งตรงหรือผ่าน relay ไปเครื่องนั้น
 5. **ถ้าเครื่องนั้นปฏิเสธ** — ไปอันดับถัดไปได้เฉพาะกรณีที่พิสูจน์ได้ว่ายังไม่ได้รัน:
    link ไม่ READY ตอนจะส่ง (ไม่ได้ส่ง) หรือตอบ `busy` (ปฏิเสธก่อนรัน)
    กรณีอื่น (timeout, connection หลุด, executor error) รายงาน error ทันที — at-most-once
@@ -72,7 +72,7 @@ advert ที่ออกก่อนงานเริ่มแต่มาถ�
 1. ไม่รู้จัก node นั้น → `target_not_found`
 2. node นั้นไม่ได้ประกาศ capability → `capability_not_supported`
 3. `allow` ไม่มีผู้เรียก → `unauthorized`
-4. link ไม่ READY หรือ availability ไม่พร้อม → `target_unavailable`
+4. ไม่มี link/เส้นทาง relay หรือ availability ไม่พร้อม → `target_unavailable`
 5. เต็ม (นับ `unseen_jobs` ด้วย) → `busy`
 6. ผ่าน → ส่งไปเครื่องนั้นเท่านั้น
 
@@ -110,11 +110,11 @@ ledger ปิดช่องว่างสำหรับงานของผ�
 
 ผลวัดภายใต้โหลดต่อเนื่อง อยู่ใน [`test-report.md`](test-report.md) หัวข้อ "การกระจายงานภายใต้โหลด"
 
-## ????????????? (v0.0.4)
+## เส้นทางข้ามวง (v0.0.4)
 
-`routing/paths.rs` ?? shortest path ???? BFS ?????? READY link ????????????????? neighbors ??????????????????????????
-??????????????????????????? node id ???????????????? snapshot ????
-CandidateReport ?? `hops` (0=??????, 1=???, ??????? 1=relay) ??? `via` ?????? first hop
-??????????????????? hop ???????? CPU/????????????????
-??????? target ?????????????????????????????? ???????????????????????????????????
-?????????? unreachable/ttl_exceeded ????????????? fallback ??????????????????????
+`routing/paths.rs` หา shortest path ด้วย BFS ใช้ READY link ของผู้เรียกและคู่ neighbors ที่ทั้งสองฝั่งประกาศตรงกัน
+เส้นทางยาวเท่ากันตัดสินด้วย node id ผลคงเดิมเมื่อ snapshot เดิม
+CandidateReport มี `hops` (0=ตัวเอง, 1=ตรง, มากกว่า 1=relay) และ `via` สำหรับ first hop
+โหลดเท่ากันจึงเลือก hop น้อยก่อน CPU/ประวัติการส่งงาน
+ระบุ target แล้วยังคงส่งถึงเครื่องนั้นเท่านั้น ไม่มีการเปลี่ยนปลายทางเมื่อสะพานดับ
+unreachable/ttl_exceeded ก่อนรันอนุญาต fallback เฉพาะการเลือกอัตโนมัติ

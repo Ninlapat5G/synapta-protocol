@@ -17,6 +17,21 @@ Protocol ให้ node หลายเครื่องค้นพบกั�
 - **UTCP** — agent ที่ใช้ UTCP client เรียก tool ของเครื่องอื่นผ่าน node ใกล้ตัวได้ (ทดสอบกับ SDK ทางการแล้ว)
 - **ไม่ผูกกับ runtime ใด** — Syn-Script, Claude Code หรือ agent อื่นต่อเข้ามาเป็น executor ตัวหนึ่ง
 
+## เปิด Synapta Lab
+
+แตก zip แล้วเปิด `Start-Lab.cmd` เข้า `http://127.0.0.1:7878/` จากเครื่องนี้
+หรือ `http://<IP Tailscale ของเครื่องนี้>:7878/` จากมือถือ เว็บฟังเฉพาะ loopback และ IP Tailscale ของเครื่องนี้
+ไม่มี login ตามขอบเขตตัวจำลองที่ตกลงไว้ ปิดหน้าต่างโปรแกรมเพื่อหยุด
+
+หน้า Scenarios สร้างวงเครือข่ายได้ หน้า Call ส่งงาน เลือกปลายทาง และดูเหตุผลของ routing
+ดู trace แบบสดหรือเล่นย้อนหลัง ตัดสาย ดับ node และบันทึก/โหลดผังได้
+ต้อง Save ผังก่อนปิด: node และ trace ไม่คงอยู่หลังปิดโปรแกรม การเล่นย้อน trace ไม่หยุดเวลาของ node
+
+Lab ใช้ท่อในหน่วยความจำจำลองสาย แต่ยังทำ handshake เข้ารหัส และ protocol จริงทั้งหมด
+node ไม่เชื่อมต่อเครื่องอื่นจริง รุ่นนี้ใช้ wire 4 จึงต่อกับ v0.0.3 ไม่ได้
+ไม่มีเพดาน node ที่หน้าเว็บ แต่ไม่ได้รับประกันขนาดไม่จำกัด (scenario สำเร็จรูปจำกัด 5,000 node)
+ผลเดิม 150 node วงเดียวและ 500 node หลายวงยังไม่ผ่าน ดูข้อจำกัดใน `docs/web-sandbox-plan.md`
+
 ## เริ่มเร็ว
 
 ต้องมี Rust stable (ทดสอบกับ 1.99.1)
@@ -59,7 +74,7 @@ SYNAPTA_UTCP_PYTHON=.venv-utcp/Scripts/python cargo test -p synapta-gateway --te
 crates/
   synapta-core/      ตัว protocol: transport, handshake, discovery, registry, routing, execution
   synapta-gateway/   HTTP API ภายในเครื่องของ node: UTCP adapter + endpoint ควบคุม + client
-  synapta-lab/       ????????????????????, trace/replay ?????????????????
+  synapta-lab/       เว็บจำลองวงเครือข่าย trace/replay และสถานการณ์ทดสอบ
   synapta-node/      โปรแกรม: synapta-node (daemon), synapta (CLI), synapta-sandbox (สาธิต/E2E)
 examples/sandbox/    config ของ node A/B/C
 scripts/utcp-official/  สคริปต์ทดสอบด้วย UTCP Python SDK ทางการ

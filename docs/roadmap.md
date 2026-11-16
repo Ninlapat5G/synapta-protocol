@@ -18,14 +18,13 @@
 - ช่อง handshake ขาเข้ามีจำกัด (64) โปรแกรมในเครื่องที่เปิด connection ค้างไว้กินช่องได้ครั้งละ `handshake_ms`
 
 ### Discovery / state
-- `adverts.sync` ส่ง advert ทั้งหมดทุกครั้งที่ link ใหม่ขึ้น (ไม่มี DB-description summary แบบ OSPF) — ใช้ได้กับ cluster เล็ก
-  cluster ใหญ่จะชนเพดาน frame 1 MiB
-- full mesh: ทุก node ต่อทุก node (N×(N−1) connection) ไม่มี multi-hop / area
+- `adverts.sync` ส่งรายการเวอร์ชันและ advert ที่ขาดแล้ว แต่ยังไม่มี pagination — cluster ใหญ่มากยังชน frame 1 MiB ได้
+- full mesh ภายในวงยังใช้ N×(N−1) connection มี relay ข้ามวงแล้ว แต่ผัง 150 node วงเดียวและ 500 node หลายวงยังไม่ผ่านผลวัดเดิม
 - ข้อมูลทรัพยากรช้ากว่าความจริงได้ถึง `advert_min_interval_ms` + เวลาเดินทาง — ledger ของผู้เรียกแก้ให้เฉพาะงานของตัวเอง
   งานจากผู้เรียกคนอื่นยังเห็นช้า (เครื่องปลายทางตรวจซ้ำและตอบ `busy` แล้ว routing ไปเครื่องถัดไป)
   ภายใต้โหลดหนัก `busy` เด้งยังเกิดราว 1.5 ครั้งต่องาน (ดู `test-report.md`) — ปลอดภัย แต่เสียไป-กลับหนึ่งรอบ
   ถ้าต้องลด: ให้ `busy` แนบจำนวนงานจริงกลับมา แล้ว ledger จดว่าเครื่องนั้นเต็มจนกว่า advert ใหม่มา
-- peer ที่รู้จาก advert และ dialer ยอมแพ้แล้ว จะถูก dial ใหม่ต่อเมื่อเห็น advert ใหม่ของมัน (หรือมันต่อเข้ามาเอง)
+- peer ที่รู้จาก advert และ dialer ยอมแพ้แล้ว จะถูก dial ใหม่ทันทีเมื่อ restart/เปลี่ยนที่อยู่/ต่อเข้ามาเอง หรือรอ retry ที่ถอยนานขึ้น; advert refresh ธรรมดาไม่เริ่มใหม่ทุกครั้ง
   seed ใน config ไม่มีปัญหานี้ (ลองใหม่ทุก `seed_retry_ms` ตลอด) แต่ seed ที่ปฏิเสธเราถาวร (เช่นไม่อยู่ใน trust list) จะขึ้น log เตือนทุกรอบ
 
 ### Execution
@@ -42,7 +41,7 @@
 ## สถานะเฟส
 
 ตอนนี้ยังอยู่ในเฟส sandbox (เครื่องเดียว, loopback) จนกว่าระบบจะนิ่ง · การข้ามเครื่องจริงเป็นเฟสถัดไปเสมอ
-เฟสที่จะมาก่อน: สร้าง sandbox env บนเว็บให้คนลองใช้และทดสอบ protocol/ระบบต่าง ๆ ด้วยตัวเอง (ยังไม่ได้ออกแบบ)
+เว็บ sandbox Synapta Lab มีแล้วใน v0.0.4 เปิดผ่าน loopback หรือ Tailscale ของเครื่องนี้ได้; node จำลองยังไม่ข้ามเครื่อง
 
 ## Roadmap (เรียงตามสิ่งที่กันพังได้มากสุด)
 
@@ -51,14 +50,14 @@
    (`Transport` trait รองรับแล้ว ไม่ต้องแก้ routing)
 3. **ทรัพยากรจริง** — อ่าน cpu/memory จาก host (โหมด `mock` ยังคงไว้สำหรับเทสต์)
 4. **`script.execute`** — executor ที่รัน Syn-Script ใน sandbox ของตัวเอง พร้อมสิทธิ์ต่อ module ตาม `docs/language.md` §10 ของ Syn-Script
-5. **DB summary ใน sync** + rate limit ต่อ peer → รองรับ cluster ใหญ่ขึ้น
+5. **ขยายขนาด** — delta sync มีแล้ว; เพิ่ม pagination, ลด full mesh และ rate limit ต่อ peer
 6. **สิทธิ์ละเอียด** — scope ต่อ token / ต่อ agent, เพิกถอน key โดยไม่ต้อง restart
 7. **UTCP streaming** (`streamable_http`) สำหรับ progress ของ async job · ทดสอบกับ TypeScript SDK
 8. **Idempotency key** — ให้ผู้เรียกระบุ key แล้ว retry ได้อย่างปลอดภัย (เปลี่ยน at-most-once เป็น exactly-once สำหรับงานที่ต้องการ)
 
-### ???????? Lab / relay ?????????
-- ?????????????????????????????????? ??????????????????????? card/envelope
-- job progress events ??????? relay ??? status/result/cancel ??????
-- Lab ????? login ?????????????? tailnet ?????????? IP ???????????????????????
-- ?????? trace ???????????????? ???? Save ??????; trace buffer ????????????????????????
-- ?????????? node ??? UI ?????????????????????????????? ?????????????????? full mesh
+### ข้อจำกัด Lab / relay เพิ่มเติม
+- ยังไม่เพิกถอนบัตรสมาชิกก่อนหมดอายุ และนาฬิกาคลาดกันมีผลต่อ card/envelope
+- job progress events ไม่ข้าม relay แต่ status/result/cancel ใช้ได้
+- Lab ไม่มี login ผู้ใช้ใน tailnet ที่เข้าถึง IP นี้ควบคุมผังเดียวกันได้
+- ผังและ trace ไม่คงอยู่หลังปิด ต้อง Save ผังเอง; trace buffer มีขอบเขตและอาจข้ามรายการ
+- ไม่มีเพดาน node ที่ UI ไม่ได้แปลว่ารองรับขนาดไม่จำกัด; scenario สำเร็จรูปจำกัด 5,000 node
