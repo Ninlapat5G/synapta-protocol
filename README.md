@@ -5,7 +5,7 @@
 Protocol ให้ node หลายเครื่องค้นพบกัน ประกาศความสามารถ เลือกเครื่องที่จะทำงาน และส่งงาน / เรียก tool ข้ามเครื่องได้โดยตรง
 ไม่มี server กลาง เขียนด้วย Rust + Tokio
 
-> สถานะ: **v0.0.3 — Proof of Concept** รันได้และทดสอบได้จริงบนเครื่องเดียว (loopback) ยังไม่ใช่ production
+> สถานะ: **v0.0.4 — Proof of Concept** รันได้และทดสอบได้จริงบนเครื่องเดียว (loopback) ยังไม่ใช่ production
 > ข้อจำกัดทั้งหมดอยู่ที่ [`docs/roadmap.md`](docs/roadmap.md)
 
 ## แนวคิด
@@ -59,6 +59,7 @@ SYNAPTA_UTCP_PYTHON=.venv-utcp/Scripts/python cargo test -p synapta-gateway --te
 crates/
   synapta-core/      ตัว protocol: transport, handshake, discovery, registry, routing, execution
   synapta-gateway/   HTTP API ภายในเครื่องของ node: UTCP adapter + endpoint ควบคุม + client
+  synapta-lab/       ????????????????????, trace/replay ?????????????????
   synapta-node/      โปรแกรม: synapta-node (daemon), synapta (CLI), synapta-sandbox (สาธิต/E2E)
 examples/sandbox/    config ของ node A/B/C
 scripts/utcp-official/  สคริปต์ทดสอบด้วย UTCP Python SDK ทางการ
@@ -85,7 +86,7 @@ docs/                เอกสาร (ดูด้านล่าง)
 - [`docs/test-report.md`](docs/test-report.md) — ผลทดสอบพร้อมหลักฐาน
 - [`docs/roadmap.md`](docs/roadmap.md) — ข้อจำกัดที่รู้แล้ว และแผนถัดไป
 
-## ความปลอดภัย (v0.0.3)
+## ความปลอดภัย (v0.0.4)
 
 - listen และ dial ได้เฉพาะ loopback — `0.0.0.0` ถูกปฏิเสธตั้งแต่ตรวจ config
 - ทุกการเชื่อมต่อต้องผ่าน handshake แบบลายเซ็น Ed25519 สองทาง กับ key ที่อยู่ใน trust list เท่านั้น
