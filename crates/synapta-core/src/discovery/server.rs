@@ -17,8 +17,8 @@ use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use super::flooding;
 use super::handshake::{self, HandshakeParams, Session};
+use super::{flooding, link};
 use crate::config::ms;
 use crate::error::{ErrorBody, ErrorCode};
 use crate::execution::EventSink;
@@ -90,6 +90,7 @@ async fn serve_connection(state: Arc<NodeState>, mut conn: BoxedConnection, remo
         mut opener,
     } = session;
     tracing::info!(peer = %peer, %remote, "inbound session authenticated");
+    link::peer_dialled_in(&state, &peer);
 
     let (mut reader, writer) = tokio::io::split(conn);
     let (tx, rx) = mpsc::channel(OUTBOUND_QUEUE);

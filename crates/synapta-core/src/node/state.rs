@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::config::NodeConfig;
+use crate::discovery::link::GaveUp;
 use crate::error::{ErrorBody, ErrorCode};
 use crate::execution::job_events::JobEventLog;
 use crate::execution::jobs::JobManager;
@@ -50,6 +51,8 @@ pub(crate) struct NodeState {
     /// Addresses with a running dialer task (at most one per address), each with the signal
     /// that cuts its current wait short.
     pub dialers: Mutex<HashMap<SocketAddr, Arc<Notify>>>,
+    /// Learned addresses whose dialer gave up, and when it may try again (`link::GaveUp`).
+    pub gave_up: Mutex<HashMap<SocketAddr, GaveUp>>,
     /// Relayed envelopes already delivered here (replay guard).
     pub relay_nonces: Mutex<SeenNonces>,
     pub tracer: Tracer,
@@ -91,6 +94,7 @@ impl NodeState {
             registry_version: watch::channel(0).0,
             own_advert: Mutex::new(OwnAdvert { seq: 0, signed: None }),
             dialers: Mutex::new(HashMap::new()),
+            gave_up: Mutex::new(HashMap::new()),
             relay_nonces: Mutex::new(SeenNonces::default()),
             config: parts.config,
             identity: parts.identity,

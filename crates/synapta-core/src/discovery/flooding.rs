@@ -14,7 +14,7 @@
 //!   `advert_max_age_ms` are purged for peers without a link.
 //! - Discovery: an accepted advert for a node we have no link to starts a dialer to its address
 //!   (or, if the address changed, hurries the one already waiting), unless it shares no wire
-//!   version with us.
+//!   version with us or its address was given up on recently (`link::GaveUp`).
 //!
 //! Not implemented: areas. Every node links to every node it shares a network with; nodes
 //! further away are reached through relays (`routing::paths`).
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::advert;
-use super::link::{ensure_dialing, DialTarget};
+use super::link::{self, ensure_dialing, DialTarget};
 use crate::config::ms;
 use crate::error::ErrorBody;
 use crate::node::state::NodeState;
@@ -56,6 +56,7 @@ pub(crate) fn accept_advert(
     }
     let advert = advert::verify(&signed, &state.trust, state.policy)?;
     let origin = advert.node_id.clone();
+    let incarnation = advert.incarnation;
     let origin_neighbors = advert.neighbors.clone();
     let address = advert.address.parse().ok();
     let can_talk = WireRange::SUPPORTED.highest_common(advert.wire).is_some();
@@ -85,7 +86,11 @@ pub(crate) fn accept_advert(
     // dialled: every advert it refreshes would otherwise start a handshake that must fail.
     let linked = state.registry.read().unwrap().is_ready(&origin);
     if let (false, true, Some(address)) = (linked, can_talk, address) {
-        ensure_dialing(state, address, DialTarget::Learned(origin), address_changed);
+        let target = DialTarget::Learned {
+            id: origin,
+            incarnation,
+        };
+        ensure_dialing(state, address, target, address_changed);
     }
     Ok(true)
 }
@@ -181,6 +186,7 @@ pub(crate) async fn run_publisher(state: Arc<NodeState>) {
                 let purged = state.registry.write().unwrap().purge_expired(ms(t.advert_max_age_ms), Instant::now());
                 if !purged.is_empty() {
                     tracing::info!(?purged, "forgot peers with expired adverts");
+                    link::forget_given_up(&state, &purged);
                     state.registry_changed();
                 }
             }

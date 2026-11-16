@@ -40,6 +40,7 @@ fn main() -> ExitCode {
         }
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads())
         .enable_all()
         .build()
         .expect("tokio runtime");
@@ -50,6 +51,14 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Four runtime threads per core instead of one. With a ring of 100 the workers all reported busy
+/// while the process used about 14% of the machine: they were waiting, not computing (cause not
+/// found yet, see docs/web-sandbox-plan.md). One thread per core then left the ring short of
+/// links on most runs; four per core connected it within a second (measured on 16 cores).
+fn worker_threads() -> usize {
+    4 * std::thread::available_parallelism().map_or(4, |n| n.get())
 }
 
 /// Reads the command line into the addresses to listen on, every one checked.

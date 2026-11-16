@@ -8,6 +8,7 @@
 //! authenticated, heart-beaten connection — never from relayed (possibly old) adverts.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -187,6 +188,12 @@ impl Registry {
             .and_then(|e| e.advert.as_ref())
             .map(|a| a.neighbors.clone())
             .unwrap_or_default()
+    }
+
+    /// Where to dial `node_id` and which incarnation of it advertised that address.
+    pub fn dial_info(&self, node_id: &NodeId) -> Option<(SocketAddr, u64)> {
+        let advert = self.peers.get(node_id)?.advert.as_ref()?;
+        Some((advert.address.parse().ok()?, advert.incarnation))
     }
 
     pub fn signed_advert(&self, node_id: &NodeId) -> Option<SignedAdvert> {

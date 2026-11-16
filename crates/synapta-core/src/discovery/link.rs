@@ -7,9 +7,10 @@
 //!
 //! Liveness: a ping every `heartbeat_interval`; no answer within `heartbeat_timeout` → the link is
 //! closed and the peer becomes UNAVAILABLE. Reconnects back off exponentially. After
-//! `max_reconnect_attempts` a dialer for an address learned from an advert stops (a newer advert
-//! from that peer starts a new one), while a dialer for a configured seed keeps trying every
-//! `seed_retry_ms` for as long as the node runs.
+//! `max_reconnect_attempts` a dialer for an address learned from an advert stops, while a dialer
+//! for a configured seed keeps trying every `seed_retry_ms` for as long as the node runs. A given
+//! up address is tried again at once when its node restarts or dials in, otherwise only after a
+//! wait that doubles each time (see `GaveUp`).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -172,9 +173,27 @@ impl Drop for PendingCleanup<'_> {
 pub(crate) enum DialTarget {
     /// From `discovery.seeds`: the configured way into the cluster. Never given up on.
     Seed,
-    /// From this node's advert: given up on after `max_reconnect_attempts`.
-    Learned(NodeId),
+    /// From that node's advert (`incarnation` from the same advert): given up on after
+    /// `max_reconnect_attempts`.
+    Learned { id: NodeId, incarnation: u64 },
 }
+
+/// A learned address whose dialer gave up.
+///
+/// Without this, every refresh of the node's advert (each `advert_refresh_ms`) started a fresh
+/// dialer with the full retry budget. A node can learn of many nodes it can never reach directly
+/// (everyone in the other rings, reached through relays instead); in a lab of 5 rings × 100 each
+/// node kept about 400 such dialers busy for ever and the whole lab never settled (measured).
+pub(crate) struct GaveUp {
+    id: NodeId,
+    incarnation: u64,
+    /// Times given up on in a row; each doubles the wait before the next single try.
+    strikes: u32,
+    retry_after: Instant,
+}
+
+/// Longest wait between tries of a given-up address: `seed_retry_ms` × 2^this.
+const MAX_GIVE_UP_DOUBLINGS: u32 = 5;
 
 /// Starts a dialer for `addr` unless the address is not allowed. If one is already running and
 /// `hurry` is set, it is told to retry now rather than sit out its current wait.
@@ -186,6 +205,13 @@ pub(crate) fn ensure_dialing(state: &Arc<NodeState>, addr: SocketAddr, target: D
     if state.shutdown.is_cancelled() || addr == state.listen_addr || state.policy.check(&addr).is_err() {
         return;
     }
+    let attempts = match &target {
+        DialTarget::Seed => state.config.timeouts.max_reconnect_attempts,
+        DialTarget::Learned { incarnation, .. } => match attempts_allowed(state, addr, *incarnation, hurry) {
+            Some(attempts) => attempts,
+            None => return,
+        },
+    };
     let retry_now = Arc::new(Notify::new());
     {
         let mut dialers = state.dialers.lock().unwrap();
@@ -199,9 +225,65 @@ pub(crate) fn ensure_dialing(state: &Arc<NodeState>, addr: SocketAddr, target: D
     }
     let task_state = state.clone();
     state.tasks.spawn(async move {
-        dial_loop(&task_state, addr, target, &retry_now).await;
+        dial_loop(&task_state, addr, target, attempts, &retry_now).await;
         task_state.dialers.lock().unwrap().remove(&addr);
     });
+}
+
+/// How many tries a dialer for a learned address gets: the full budget normally, one try for a
+/// given-up address whose wait is over, none while it waits. A restart (new incarnation) or news
+/// (`hurry`) clears the wait.
+fn attempts_allowed(state: &NodeState, addr: SocketAddr, incarnation: u64, hurry: bool) -> Option<u32> {
+    let full = state.config.timeouts.max_reconnect_attempts;
+    let mut gave_up = state.gave_up.lock().unwrap();
+    match gave_up.get(&addr) {
+        None => Some(full),
+        Some(g) if hurry || g.incarnation != incarnation => {
+            gave_up.remove(&addr);
+            Some(full)
+        }
+        Some(g) if Instant::now() >= g.retry_after => Some(1),
+        Some(_) => None,
+    }
+}
+
+fn record_give_up(state: &NodeState, addr: SocketAddr, id: &NodeId, incarnation: u64) {
+    let mut gave_up = state.gave_up.lock().unwrap();
+    let strikes = match gave_up.get(&addr) {
+        Some(g) if g.incarnation == incarnation => g.strikes + 1,
+        _ => 1,
+    };
+    let wait = state.config.timeouts.seed_retry_ms << (strikes - 1).min(MAX_GIVE_UP_DOUBLINGS);
+    gave_up.insert(
+        addr,
+        GaveUp {
+            id: id.clone(),
+            incarnation,
+            strikes,
+            retry_after: Instant::now() + ms(wait),
+        },
+    );
+}
+
+/// Drops the give-up marks of nodes the registry forgot.
+pub(crate) fn forget_given_up(state: &NodeState, forgotten: &[NodeId]) {
+    state.gave_up.lock().unwrap().retain(|_, g| !forgotten.contains(&g.id));
+}
+
+/// `peer` just dialled in, so this node can probably reach it too: dial it now unless already
+/// linked, even if its address was given up on.
+pub(crate) fn peer_dialled_in(state: &Arc<NodeState>, peer: &NodeId) {
+    let target = {
+        let registry = state.registry.read().unwrap();
+        if registry.is_ready(peer) {
+            return;
+        }
+        registry.dial_info(peer)
+    };
+    if let Some((addr, incarnation)) = target {
+        let id = peer.clone();
+        ensure_dialing(state, addr, DialTarget::Learned { id, incarnation }, true);
+    }
 }
 
 enum LinkEnd {
@@ -210,11 +292,11 @@ enum LinkEnd {
     Lost(String),
 }
 
-async fn dial_loop(state: &Arc<NodeState>, addr: SocketAddr, target: DialTarget, retry_now: &Notify) {
+async fn dial_loop(state: &Arc<NodeState>, addr: SocketAddr, target: DialTarget, attempts: u32, retry_now: &Notify) {
     let t = &state.config.timeouts;
-    let (is_seed, mut known) = match target {
-        DialTarget::Seed => (true, None),
-        DialTarget::Learned(id) => (false, Some(id)),
+    let (learned_incarnation, mut known) = match target {
+        DialTarget::Seed => (None, None),
+        DialTarget::Learned { id, incarnation } => (Some(incarnation), Some(id)),
     };
     let mut failures: u32 = 0;
     loop {
@@ -232,6 +314,7 @@ async fn dial_loop(state: &Arc<NodeState>, addr: SocketAddr, target: DialTarget,
         match attempt {
             Ok((conn, session)) => {
                 failures = 0;
+                state.gave_up.lock().unwrap().remove(&addr);
                 let peer = session.peer.clone();
                 known = Some(peer.clone());
                 match run_link(state, conn, session).await {
@@ -250,9 +333,16 @@ async fn dial_loop(state: &Arc<NodeState>, addr: SocketAddr, target: DialTarget,
                     error.code,
                     ErrorCode::UntrustedPeer | ErrorCode::VersionMismatch | ErrorCode::HandshakeFailed
                 );
-                exhausted = permanent || failures >= t.max_reconnect_attempts;
-                if exhausted && !is_seed {
-                    tracing::warn!(%addr, peer = ?known, failures, "giving up on this address until a newer advert arrives");
+                let out_of_tries = failures >= attempts;
+                exhausted = permanent || out_of_tries;
+                if let (true, Some(incarnation), Some(id)) = (exhausted, learned_incarnation, &known) {
+                    tracing::warn!(%addr, peer = %id, failures, "giving up on this address for now");
+                    // Only an address that stayed unreachable earns the long wait. A refused
+                    // handshake is retried with the node's next advert: under load a handshake
+                    // can fail once, and a 30 s wait then left a ring of 100 short of links.
+                    if out_of_tries {
+                        record_give_up(state, addr, id, incarnation);
+                    }
                     return;
                 }
             }
